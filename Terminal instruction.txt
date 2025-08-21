@@ -1,3 +1,0 @@
-cd "/Users/kennethyau/Python Script/yt-structurer"
-
-
