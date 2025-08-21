@@ -40,17 +40,6 @@ PLAYLIST_REGEX = re.compile(
     re.IGNORECASE,
 )
 
-def is_valid_youtube_url(url: str) -> bool:
-    return bool(YOUTUBE_REGEX.match((url or "").strip()))
-
-def is_valid_playlist_url(url: str) -> bool:
-    return bool(PLAYLIST_REGEX.match((url or "").strip()))
-
-def extract_playlist_id(url: str) -> Optional[str]:
-    """Extract playlist ID from YouTube playlist URL"""
-    match = re.search(r'list=([\w-]+)', url)
-    return match.group(1) if match else None
-
 # Language-specific system prompts
 ENGLISH_SYSTEM_PROMPT = (
     "You are a careful transcript formatter. Your job is to STRUCTURE (not rewrite) a raw English "
@@ -106,6 +95,17 @@ LANGUAGE_CODES = {
     "English": "en",
     "中文": "zh"
 }
+
+def is_valid_youtube_url(url: str) -> bool:
+    return bool(YOUTUBE_REGEX.match((url or "").strip()))
+
+def is_valid_playlist_url(url: str) -> bool:
+    return bool(PLAYLIST_REGEX.match((url or "").strip()))
+
+def extract_playlist_id(url: str) -> Optional[str]:
+    """Extract playlist ID from YouTube playlist URL"""
+    match = re.search(r'list=([\w-]+)', url)
+    return match.group(1) if match else None
 
 def deepseek_chat(
     api_key: str,
@@ -235,50 +235,85 @@ def fetch_transcript_with_supadata(api_key: str, url: str, language: str = "en")
     text = text.strip() if isinstance(text, str) else ""
     return text or None
 
-def get_playlist_videos(playlist_url: str) -> List[Dict[str, str]]:
+def get_playlist_videos(youtube_api_key: str, playlist_url: str) -> List[Dict[str, str]]:
     """
-    Extract video URLs from a YouTube playlist.
-    This is a simplified implementation - in production you might want to use YouTube Data API.
-    For now, this returns a placeholder structure.
+    Extract video URLs from a YouTube playlist using YouTube Data API v3.
+    Returns list of dicts with 'title', 'url', and 'video_id' keys.
     """
-    # Note: This is a simplified approach. For production use, consider:
-    # 1. YouTube Data API v3
-    # 2. yt-dlp library
-    # 3. Other YouTube scraping libraries
+    if not YOUTUBE_API_AVAILABLE:
+        st.error("YouTube Data API client not available. Install the required package:")
+        st.code("pip install google-api-python-client")
+        if not YOUTUBE_API_AVAILABLE:
+            st.caption(f"Import error details: {getattr(globals(), '_youtube_api_import_error', 'unknown')}")
+        return []
     
-    # Placeholder implementation - you would need to implement actual playlist parsing
-    # This could be done with YouTube Data API or web scraping
-    st.warning("Playlist processing is not fully implemented in this demo. You would need to:")
-    st.info("""
-    1. Use YouTube Data API v3 to get playlist items
-    2. Or use a library like yt-dlp to extract video URLs
-    3. Or implement web scraping (not recommended due to ToS)
+    playlist_id = extract_playlist_id(playlist_url)
+    if not playlist_id:
+        st.error("Could not extract playlist ID from URL")
+        return []
     
-    For now, please process videos individually.
-    """)
-    
-    return []
+    try:
+        youtube = build('youtube', 'v3', developerKey=youtube_api_key)
+        
+        videos = []
+        next_page_token = None
+        
+        while True:
+            # Get playlist items
+            playlist_response = youtube.playlistItems().list(
+                part='snippet',
+                playlistId=playlist_id,
+                maxResults=50,  # Maximum allowed per request
+                pageToken=next_page_token
+            ).execute()
+            
+            for item in playlist_response['items']:
+                video_id = item['snippet']['resourceId']['videoId']
+                title = item['snippet']['title']
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
+                
+                videos.append({
+                    'title': title,
+                    'url': video_url,
+                    'video_id': video_id
+                })
+            
+            next_page_token = playlist_response.get('nextPageToken')
+            if not next_page_token:
+                break
+        
+        return videos
+        
+    except HttpError as e:
+        st.error(f"YouTube API error: {e}")
+        return []
+    except Exception as e:
+        st.error(f"Unexpected error accessing YouTube API: {e}")
+        return []
 
-def process_playlist_transcripts(api_key: str, playlist_url: str, language: str) -> List[Tuple[str, str, Optional[str]]]:
+def process_playlist_transcripts(supa_api_key: str, youtube_api_key: str, playlist_url: str, language: str) -> List[Tuple[str, str, Optional[str]]]:
     """
     Process all videos in a playlist and return their transcripts.
     Returns list of tuples: (video_title, video_url, transcript_text)
     """
-    videos = get_playlist_videos(playlist_url)
+    videos = get_playlist_videos(youtube_api_key, playlist_url)
+    if not videos:
+        return []
+    
     results = []
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     for i, video in enumerate(videos):
-        status_text.text(f"Processing video {i+1}/{len(videos)}: {video['title']}")
+        status_text.text(f"Processing video {i+1}/{len(videos)}: {video['title'][:50]}...")
         
-        transcript = fetch_transcript_with_supadata(api_key, video['url'], language)
+        transcript = fetch_transcript_with_supadata(supa_api_key, video['url'], language)
         results.append((video['title'], video['url'], transcript))
         
         progress_bar.progress((i + 1) / len(videos))
     
-    status_text.text("All videos processed!")
+    status_text.text(f"Processed {len(videos)} videos!")
     return results
 
 # ------------- Streamlit UI -------------
@@ -289,8 +324,25 @@ st.caption("Enhanced with language selection and playlist support")
 
 with st.sidebar:
     st.subheader("API Keys & Model")
-    supa_key = st.text_input("Supadata API Key", type="password")
-    ds_key = st.text_input("DeepSeek API Key", type="password")
+    supa_key = st.text_input("Supadata API Key", type="password", help="Required for transcript extraction")
+    ds_key = st.text_input("DeepSeek API Key", type="password", help="Required for transcript structuring")
+    youtube_key = st.text_input("YouTube Data API v3 Key", type="password", help="Required for playlist processing")
+    
+    with st.expander("📋 How to get API keys", expanded=False):
+        st.markdown("""
+        **Supadata API Key:**
+        - Sign up at [Supadata](https://supadata.ai)
+        
+        **DeepSeek API Key:**
+        - Sign up at [DeepSeek](https://platform.deepseek.com)
+        
+        **YouTube Data API v3 Key:**
+        1. Go to [Google Cloud Console](https://console.cloud.google.com)
+        2. Create a new project or select existing
+        3. Enable YouTube Data API v3
+        4. Create credentials (API Key)
+        5. Restrict the key to YouTube Data API v3
+        """)
 
     st.divider()
     st.subheader("Language Settings")
@@ -368,10 +420,12 @@ if processing_mode == "Playlist" and fetch_playlist_clicked:
         st.warning("Please enter a valid YouTube playlist URL.")
     elif not supa_key:
         st.warning("Please provide your Supadata API key in the sidebar.")
+    elif not youtube_key:
+        st.warning("Please provide your YouTube Data API v3 key in the sidebar.")
     else:
         language_code = LANGUAGE_CODES[selected_language]
         with st.spinner(f"Processing playlist for {selected_language} transcripts..."):
-            playlist_results = process_playlist_transcripts(supa_key, playlist_url, language_code)
+            playlist_results = process_playlist_transcripts(supa_key, youtube_key, playlist_url, language_code)
         
         if playlist_results:
             st.session_state["playlist_transcripts"] = playlist_results
@@ -447,7 +501,7 @@ if processing_mode == "Playlist" and structure_playlist_clicked:
             status_text = st.empty()
             
             for i, (title, video_url, transcript) in enumerate(transcripts_to_process):
-                status_text.text(f"Structuring video {i+1}/{len(transcripts_to_process)}: {title}")
+                status_text.text(f"Structuring video {i+1}/{len(transcripts_to_process)}: {title[:50]}...")
                 
                 try:
                     structured_md = deepseek_chat(
@@ -533,6 +587,21 @@ if processing_mode == "Playlist" and structured_playlist:
 st.divider()
 st.caption(
     f"Language: {selected_language} | Mode: {processing_mode} | "
-    "Uses Supadata for transcripts and DeepSeek for structuring. "
-    "Note: Playlist functionality requires additional implementation for video URL extraction."
+    "Uses Supadata for transcripts, DeepSeek for structuring, and YouTube Data API v3 for playlists."
 )
+
+# Installation instructions
+with st.expander("📦 Installation Requirements", expanded=False):
+    st.markdown("""
+    To use all features of this app, install the required packages:
+    
+    ```bash
+    pip install streamlit supadata requests google-api-python-client
+    ```
+    
+    **Package purposes:**
+    - `supadata`: YouTube transcript extraction
+    - `google-api-python-client`: YouTube Data API v3 for playlist processing
+    - `requests`: DeepSeek API communication
+    - `streamlit`: Web interface
+    """)
