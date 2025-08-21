@@ -101,96 +101,6 @@ class SupadataTranscriptProvider(TranscriptProvider):
         except Exception:
             return ""
 
-class AssemblyAITranscriptProvider(TranscriptProvider):
-    """Fallback provider for ASR when no official captions available"""
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = "https://api.assemblyai.com/v2"
-    
-    def get_transcript(self, url: str, language: str) -> Optional[str]:
-        if not self.api_key:
-            st.warning("AssemblyAI API key not provided")
-            return None
-            
-        try:
-            st.info(f"🎤 Starting ASR transcription for: {url}")
-            
-            # Step 1: Get audio URL from video URL
-            # AssemblyAI needs a direct audio URL, but we're passing a YouTube URL
-            # This is a limitation - AssemblyAI can't directly process YouTube URLs
-            # We need to extract audio first
-            
-            # For now, let's try the URL as-is and see what happens
-            headers = {
-                "authorization": self.api_key,
-                "content-type": "application/json"
-            }
-            
-            # Map our language selection to AssemblyAI language codes
-            language_map = {
-                "English": "en",
-                "中文": "zh"
-            }
-            
-            data = {
-                "audio_url": url,  # This won't work with YouTube URLs!
-                "language_code": language_map.get(language, "en")
-            }
-            
-            st.info("📤 Submitting transcription request to AssemblyAI...")
-            response = requests.post(
-                f"{self.base_url}/transcript",
-                json=data,
-                headers=headers,
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                error_msg = response.json().get('error', 'Unknown error')
-                st.error(f"❌ AssemblyAI submission error ({response.status_code}): {error_msg}")
-                return None
-                
-            transcript_id = response.json()['id']
-            st.info(f"✅ Transcript submitted with ID: {transcript_id}")
-            
-            # Step 2: Poll for completion
-            polling_endpoint = f"{self.base_url}/transcript/{transcript_id}"
-            max_attempts = 60  # 3 minutes max
-            attempt = 0
-            
-            st.info("⏳ Polling for transcription completion...")
-            
-            while attempt < max_attempts:
-                polling_response = requests.get(polling_endpoint, headers=headers, timeout=30)
-                polling_response_data = polling_response.json()
-                
-                status = polling_response_data['status']
-                st.info(f"📊 Status: {status} (attempt {attempt + 1}/{max_attempts})")
-                
-                if status == 'completed':
-                    st.success("🎉 Transcription completed!")
-                    return polling_response_data['text']
-                elif status == 'error':
-                    error_msg = polling_response_data.get('error', 'Unknown transcription error')
-                    st.error(f"❌ AssemblyAI transcription error: {error_msg}")
-                    return None
-                else:
-                    time.sleep(3)  # Wait before polling again
-                    attempt += 1
-            
-            st.error("⏰ Transcription timed out")
-            return None
-                    
-        except requests.exceptions.Timeout:
-            st.error("🕐 Request timed out")
-            return None
-        except requests.exceptions.RequestException as e:
-            st.error(f"🌐 Network error: {e}")
-            return None
-        except Exception as e:
-            st.error(f"💥 AssemblyAI processing error: {e}")
-            return None
-
 class YouTubeAudioExtractor:
     """Helper class to extract audio URLs from YouTube videos for ASR"""
     
@@ -463,24 +373,19 @@ class DeepSeekProvider(LLMProvider):
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
 
 class YouTubeDataProvider:
-    """Provider for YouTube Data API operations"""
+    """Provider for YouTube Data API operations using direct HTTP requests"""
     def __init__(self, api_key: str):
-        try:
-            from googleapiclient.discovery import build
-            from googleapiclient.errors import HttpError
-            self.youtube = build('youtube', 'v3', developerKey=api_key)
-            self.available = True
-        except ImportError:
-            self.available = False
-            self.youtube = None
+        self.api_key = api_key
+        self.base_url = "https://www.googleapis.com/youtube/v3"
+        self.available = bool(api_key)  # Simple check - just need API key
     
     def get_playlist_videos(self, playlist_url: str) -> List[Dict[str, str]]:
         """
         Extract video URLs from a YouTube playlist using YouTube Data API v3.
         Returns list of dicts with 'title', 'url', and 'video_id' keys.
         """
-        if not self.available or not self.youtube:
-            st.error("YouTube Data API client not available.")
+        if not self.available or not self.api_key:
+            st.error("YouTube Data API key not available.")
             return []
             
         playlist_id = self.extract_playlist_id(playlist_url)
@@ -493,33 +398,69 @@ class YouTubeDataProvider:
             next_page_token = None
             
             while True:
-                # Get playlist items
-                playlist_response = self.youtube.playlistItems().list(
-                    part='snippet',
-                    playlistId=playlist_id,
-                    maxResults=50,  # Maximum allowed per request
-                    pageToken=next_page_token
-                ).execute()
+                # Build the API request URL
+                params = {
+                    'part': 'snippet',
+                    'playlistId': playlist_id,
+                    'maxResults': 50,
+                    'key': self.api_key
+                }
                 
-                for item in playlist_response['items']:
-                    video_id = item['snippet']['resourceId']['videoId']
-                    title = item['snippet']['title']
-                    video_url = f"https://www.youtube.com/watch?v={video_id}"
+                if next_page_token:
+                    params['pageToken'] = next_page_token
+                
+                # Make the HTTP request
+                response = requests.get(
+                    f"{self.base_url}/playlistItems",
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code != 200:
+                    error_msg = f"YouTube API error ({response.status_code})"
+                    try:
+                        error_data = response.json()
+                        if 'error' in error_data:
+                            error_msg += f": {error_data['error'].get('message', 'Unknown error')}"
+                    except:
+                        error_msg += f": {response.text[:200]}"
                     
-                    videos.append({
-                        'title': title,
-                        'url': video_url,
-                        'video_id': video_id
-                    })
+                    st.error(error_msg)
+                    return []
                 
+                playlist_response = response.json()
+                
+                # Process the items
+                for item in playlist_response.get('items', []):
+                    snippet = item.get('snippet', {})
+                    resource_id = snippet.get('resourceId', {})
+                    
+                    video_id = resource_id.get('videoId')
+                    title = snippet.get('title', 'Unknown Title')
+                    
+                    if video_id:
+                        video_url = f"https://www.youtube.com/watch?v={video_id}"
+                        videos.append({
+                            'title': title,
+                            'url': video_url,
+                            'video_id': video_id
+                        })
+                
+                # Check for next page
                 next_page_token = playlist_response.get('nextPageToken')
                 if not next_page_token:
                     break
             
             return videos
             
+        except requests.exceptions.Timeout:
+            st.error("YouTube API request timed out")
+            return []
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error accessing YouTube API: {e}")
+            return []
         except Exception as e:
-            st.error(f"Error accessing YouTube API: {e}")
+            st.error(f"Error processing YouTube API response: {e}")
             return []
     
     def extract_playlist_id(self, url: str) -> Optional[str]:
@@ -655,6 +596,26 @@ class YouTubeTranscriptApp:
             re.IGNORECASE,
         )
         return bool(playlist_regex.match((url or "").strip()))
+    
+    def sanitize_filename(self, filename: str) -> str:
+        """Remove or replace characters that aren't safe for filenames"""
+        # Remove/replace problematic characters
+        filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+        # Remove extra whitespace and leading/trailing spaces
+        filename = re.sub(r'\s+', ' ', filename).strip()
+        # Ensure it's not empty
+        return filename if filename else "transcript"
+    
+    def extract_title_from_markdown(self, md_content: str) -> Optional[str]:
+        """Extract the main title from markdown content (first # heading)"""
+        lines = md_content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('# ') and len(line) > 2:
+                title = line[2:].strip()
+                # Clean up the title for use as filename
+                return self.sanitize_filename(title)
+        return None
     
     def render_sidebar(self):
         with st.sidebar:
@@ -1143,13 +1104,12 @@ class YouTubeTranscriptApp:
             To use all features of this app, install the required packages:
             
             ```bash
-            pip install streamlit supadata requests google-api-python-client yt-dlp
+            pip install streamlit supadata requests yt-dlp
             ```
             
             **Package purposes:**
             - `supadata`: YouTube transcript extraction
-            - `google-api-python-client`: YouTube Data API v3 for playlist processing
-            - `requests`: DeepSeek and AssemblyAI API communication
+            - `requests`: DeepSeek, AssemblyAI, and YouTube Data API v3 communication
             - `streamlit`: Web interface
             - `yt-dlp`: YouTube audio extraction for ASR fallback
             """)
@@ -1186,7 +1146,6 @@ class YouTubeTranscriptApp:
             ### Note:
             ASR transcription takes longer than caption extraction (2-5 minutes depending on video length).
             """)
-    
     
     def run(self):
         sidebar_config = self.render_sidebar()
