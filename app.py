@@ -215,13 +215,11 @@ class YouTubeAudioExtractor:
 
             # Try cookies if we started with none
             if mode == "none":
-                # Prefer cookies.txt if present, else browser:chrome
-                if cookiefile and os.path.exists(cookiefile):
-                    st.info("🔁 Retrying with cookies.txt...")
-                    st.session_state["cookie_mode"] = "cookies.txt"
-                else:
-                    st.info("🔁 Retrying with browser:chrome cookies...")
-                    st.session_state["cookie_mode"] = "browser:chrome"
+    if cookiefile and os.path.exists(cookiefile):
+        st.info("🔁 Retrying with cookies.txt...")
+        st.session_state["cookie_mode"] = "cookies.txt"
+    else:
+        raise RuntimeError("No cookies available on server. Provide cookies.txt via a Secret File on Render.")
                 try:
                     cookie_opts = build_ytdlp_opts_from_session()
                     url = with_retries(lambda: self._extract_core(youtube_url, cookie_opts), tries=1)
