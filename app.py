@@ -688,7 +688,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             return self._poll_for_completion(transcript_id, headers)
             
         except requests.exceptions.Timeout:
-            st.error("🕐 Request timed out while submitting to AssemblyAI")
+            st.error("🕘 Request timed out while submitting to AssemblyAI")
             return None
         except requests.exceptions.RequestException as e:
             st.error(f"🌐 Network error communicating with AssemblyAI: {e}")
@@ -752,7 +752,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                     attempt += 1
             
             except requests.exceptions.Timeout:
-                st.error("🕐 Polling request timed out")
+                st.error("🕘 Polling request timed out")
                 return None
             except Exception as e:
                 st.error(f"💥 Polling error: {e}")
@@ -1111,3 +1111,347 @@ class TranscriptOrchestrator:
         if not self.llm_provider:
             return None
         return self.llm_provider.structure_transcript(transcript, system_prompt)
+
+# ==================== STREAMLIT UI ====================
+
+def login_page():
+    """Display login page"""
+    st.title("🎬 YouTube Transcript Processor")
+    st.subheader("🔐 Login Required")
+    
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submit_button = st.form_submit_button("Login")
+        
+        if submit_button:
+            if not username or not password:
+                st.error("Please enter both username and password")
+                return False
+            
+            auth_manager = AuthManager()
+            if auth_manager.authenticate(username, password):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.session_state.api_keys = auth_manager.get_user_api_keys(username)
+                st.success("Login successful!")
+                st.rerun()
+                return True
+            else:
+                st.error("Invalid credentials")
+                return False
+    
+    return False
+
+def main_app():
+    """Main application interface"""
+    st.title("🎬 YouTube Transcript Processor")
+    
+    # Logout button
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("Logout"):
+            for key in ['authenticated', 'username', 'api_keys']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+    
+    st.write(f"Welcome, **{st.session_state.username}**! 👋")
+    
+    # Get API keys from session
+    api_keys = st.session_state.get('api_keys', {})
+    
+    # Configuration Section
+    st.header("⚙️ Configuration")
+    
+    with st.expander("📊 API Status", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if api_keys.get('supadata'):
+                st.success("✅ Supadata")
+            else:
+                st.error("❌ Supadata")
+        
+        with col2:
+            if api_keys.get('assemblyai'):
+                st.success("✅ AssemblyAI")
+            else:
+                st.error("❌ AssemblyAI")
+        
+        with col3:
+            if api_keys.get('deepseek'):
+                st.success("✅ DeepSeek")
+            else:
+                st.error("❌ DeepSeek")
+        
+        with col4:
+            if api_keys.get('youtube'):
+                st.success("✅ YouTube Data")
+            else:
+                st.error("❌ YouTube Data")
+    
+    # Settings
+    with st.expander("🔧 Processing Settings"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            language = st.selectbox(
+                "Language",
+                ["English", "中文"],
+                help="Select the language for transcription"
+            )
+            
+            use_asr_fallback = st.checkbox(
+                "Enable ASR Fallback",
+                value=True,
+                help="Use AssemblyAI when official captions are not available"
+            )
+        
+        with col2:
+            deepseek_model = st.selectbox(
+                "DeepSeek Model",
+                ["deepseek-chat", "deepseek-reasoner"],
+                index=1,
+                help="Select the DeepSeek model to use"
+            )
+            
+            temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.1,
+                step=0.1,
+                help="Controls randomness in LLM responses"
+            )
+    
+    # Main Processing Section
+    st.header("🎯 Process Video")
+    
+    # Input methods
+    input_method = st.radio(
+        "Input Method",
+        ["Single Video URL", "Playlist URL", "Batch URLs"],
+        help="Choose how to input videos"
+    )
+    
+    videos_to_process = []
+    
+    if input_method == "Single Video URL":
+        video_url = st.text_input(
+            "YouTube Video URL",
+            placeholder="https://www.youtube.com/watch?v=...",
+            help="Enter a single YouTube video URL"
+        )
+        if video_url:
+            videos_to_process = [{"title": "Single Video", "url": video_url}]
+    
+    elif input_method == "Playlist URL":
+        playlist_url = st.text_input(
+            "YouTube Playlist URL",
+            placeholder="https://www.youtube.com/playlist?list=...",
+            help="Enter a YouTube playlist URL"
+        )
+        if playlist_url and api_keys.get('youtube'):
+            if st.button("Load Playlist"):
+                with st.spinner("Loading playlist videos..."):
+                    youtube_provider = YouTubeDataProvider(api_keys['youtube'])
+                    videos_to_process = youtube_provider.get_playlist_videos(playlist_url)
+                    if videos_to_process:
+                        st.success(f"Loaded {len(videos_to_process)} videos from playlist")
+                        st.session_state.playlist_videos = videos_to_process
+    
+    elif input_method == "Batch URLs":
+        batch_urls = st.text_area(
+            "YouTube Video URLs (one per line)",
+            placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...",
+            help="Enter multiple YouTube video URLs, one per line"
+        )
+        if batch_urls:
+            urls = [url.strip() for url in batch_urls.split('\n') if url.strip()]
+            videos_to_process = [{"title": f"Video {i+1}", "url": url} for i, url in enumerate(urls)]
+    
+    # Show loaded videos
+    if input_method == "Playlist URL" and 'playlist_videos' in st.session_state:
+        videos_to_process = st.session_state.playlist_videos
+    
+    if videos_to_process:
+        st.subheader(f"📋 Videos to Process ({len(videos_to_process)})")
+        
+        # Show video selection for playlists/batch
+        if len(videos_to_process) > 1:
+            with st.expander("Select Videos to Process", expanded=True):
+                selected_videos = []
+                select_all = st.checkbox("Select All", value=True)
+                
+                for i, video in enumerate(videos_to_process):
+                    if select_all:
+                        selected = True
+                    else:
+                        selected = st.checkbox(f"{video['title'][:50]}...", key=f"video_{i}")
+                    
+                    if selected:
+                        selected_videos.append(video)
+                
+                videos_to_process = selected_videos
+        
+        # Custom system prompt
+        st.subheader("📝 System Prompt")
+        
+        default_prompts = {
+            "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
+
+Please structure the transcript following these guidelines:
+
+1. **Create clear sections and headings** based on topic changes and content flow
+2. **Improve readability** by:
+   - Fixing grammar and punctuation
+   - Removing filler words (um, uh, like, you know)
+   - Combining fragmented sentences
+   - Adding paragraph breaks for better flow
+
+3. **Preserve all important information** - don't summarize or omit content
+4. **Use markdown formatting** for headers, emphasis, and structure
+5. **Add timestamps** where natural topic transitions occur
+6. **Maintain the speaker's tone and meaning** while improving clarity
+
+Format the output as a clean, professional document that would be easy to read and reference.""",
+            
+            "中文": """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
+
+请按照以下指导原则来结构化转录文本：
+
+1. **创建清晰的章节和标题**，基于主题变化和内容流程
+2. **提高可读性**：
+   - 修正语法和标点符号
+   - 删除填充词（嗯、呃、那个、就是说）
+   - 合并断裂的句子
+   - 添加段落分隔以改善流畅性
+
+3. **保留所有重要信息** - 不要总结或省略内容
+4. **使用markdown格式** 来设置标题、强调和结构
+5. **在自然主题转换处添加时间戳**
+6. **保持说话者的语调和意思**，同时提高清晰度
+
+将输出格式化为一个清洁、专业的文档，便于阅读和参考。"""
+        }
+        
+        system_prompt = st.text_area(
+            "System Prompt",
+            value=default_prompts[language],
+            height=200,
+            help="Customize how the AI should structure the transcript"
+        )
+        
+        # Processing button
+        if st.button("🚀 Start Processing", type="primary"):
+            if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
+                st.error("❌ No transcript providers available. Please configure API keys.")
+                return
+            
+            if not api_keys.get('deepseek'):
+                st.error("❌ DeepSeek API key required for structuring. Please configure API keys.")
+                return
+            
+            process_videos(videos_to_process, language, use_asr_fallback, system_prompt, 
+                          deepseek_model, temperature, api_keys)
+
+def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys):
+    """Process multiple videos"""
+    
+    # Initialize providers
+    supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
+    assemblyai_provider = ImprovedAssemblyAITranscriptProvider(api_keys.get('assemblyai', '')) if use_asr_fallback else None
+    deepseek_provider = DeepSeekProvider(
+        api_keys.get('deepseek', ''),
+        "https://api.deepseek.com/v1",
+        deepseek_model,
+        temperature
+    )
+    
+    orchestrator = TranscriptOrchestrator(
+        supadata_provider,
+        assemblyai_provider,
+        deepseek_provider
+    )
+    
+    # Process each video
+    for i, video in enumerate(videos):
+        st.subheader(f"📹 Processing Video {i+1}/{len(videos)}")
+        st.write(f"**Title:** {video['title']}")
+        st.write(f"**URL:** {video['url']}")
+        
+        try:
+            # Step 1: Get transcript
+            with st.spinner("🔍 Getting transcript..."):
+                transcript = orchestrator.get_transcript(video['url'], language, use_asr_fallback)
+            
+            if not transcript:
+                st.error("❌ Failed to get transcript")
+                continue
+            
+            # Show transcript preview
+            with st.expander("📄 Raw Transcript Preview"):
+                st.text_area("Transcript", transcript[:1000] + "..." if len(transcript) > 1000 else transcript, height=200)
+            
+            # Step 2: Structure transcript
+            with st.spinner("🤖 Structuring transcript with LLM..."):
+                structured = orchestrator.structure_transcript(transcript, system_prompt)
+            
+            if not structured:
+                st.error("❌ Failed to structure transcript")
+                continue
+            
+            # Display results
+            st.success("✅ Processing completed!")
+            
+            # Show structured result
+            with st.expander("📋 Structured Transcript", expanded=True):
+                st.markdown(structured)
+            
+            # Download options
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "💾 Download Raw Transcript",
+                    transcript,
+                    file_name=f"raw_transcript_{i+1}.txt",
+                    mime="text/plain"
+                )
+            
+            with col2:
+                st.download_button(
+                    "📄 Download Structured Transcript",
+                    structured,
+                    file_name=f"structured_transcript_{i+1}.md",
+                    mime="text/markdown"
+                )
+            
+            st.divider()
+            
+        except Exception as e:
+            st.error(f"💥 Error processing video: {str(e)}")
+            continue
+
+# ==================== MAIN ENTRY POINT ====================
+
+def main():
+    """Main entry point"""
+    st.set_page_config(
+        page_title="YouTube Transcript Processor",
+        page_icon="🎬",
+        layout="wide"
+    )
+    
+    # Initialize session state
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    
+    # Show appropriate page
+    if not st.session_state.authenticated:
+        login_page()
+    else:
+        main_app()
+
+if __name__ == "__main__":
+    main()
