@@ -38,6 +38,31 @@ class AuthManager:
     
     def _load_users_from_env(self):
         """Load users from environment variables"""
+        # Update admin user's API keys from environment variables
+        admin_keys = self.users["admin"]["api_keys"]
+        
+        # Direct environment variable mapping for admin user
+        env_mappings = {
+            "ADMIN_SUPADATA_KEY": "supadata",
+            "ADMIN_ASSEMBLYAI_KEY": "assemblyai", 
+            "ADMIN_DEEPSEEK_KEY": "deepseek",
+            "ADMIN_YOUTUBE_KEY": "youtube",
+            # Also support common alternative names
+            "SUPADATA_API_KEY": "supadata",
+            "ASSEMBLYAI_API_KEY": "assemblyai",
+            "DEEPSEEK_API_KEY": "deepseek", 
+            "YOUTUBE_API_KEY": "youtube",
+            "ASSEMBLYAI_KEY": "assemblyai",
+            "DEEPSEEK_KEY": "deepseek",
+        }
+        
+        for env_key, api_key_name in env_mappings.items():
+            env_value = os.getenv(env_key)
+            if env_value:
+                admin_keys[api_key_name] = env_value
+                print(f"✅ Loaded {api_key_name} API key from {env_key}")
+        
+        # Legacy support: Load users from patterned environment variables
         # Format: USER1_PASSWORD, USER1_SUPADATA_KEY, etc.
         env_users = {}
         for key, value in os.environ.items():
@@ -67,8 +92,10 @@ class AuthManager:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["youtube"] = value
         
-        # Merge with existing users
-        self.users.update(env_users)
+        # Merge with existing users (but don't overwrite admin if it has keys)
+        for username, user_data in env_users.items():
+            if username != "admin":  # Don't overwrite admin user
+                self.users[username] = user_data
     
     def authenticate(self, username: str, password: str) -> bool:
         """Authenticate user credentials"""
@@ -1190,6 +1217,37 @@ def main_app():
                 st.success("✅ YouTube Data")
             else:
                 st.error("❌ YouTube Data")
+    
+    # Debug section to help troubleshoot API key loading
+    with st.expander("🐛 Debug Info", expanded=False):
+        st.subheader("Environment Variables Check")
+        
+        # Check what env vars are available
+        env_vars_found = []
+        possible_keys = [
+            "ADMIN_SUPADATA_KEY", "ADMIN_ASSEMBLYAI_KEY", "ADMIN_DEEPSEEK_KEY", "ADMIN_YOUTUBE_KEY",
+            "SUPADATA_API_KEY", "ASSEMBLYAI_API_KEY", "DEEPSEEK_API_KEY", "YOUTUBE_API_KEY",
+            "ASSEMBLYAI_KEY", "DEEPSEEK_KEY"
+        ]
+        
+        for key in possible_keys:
+            value = os.getenv(key)
+            if value:
+                masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:] if len(value) > 8 else "****"
+                env_vars_found.append(f"✅ {key}: {masked_value}")
+            else:
+                env_vars_found.append(f"❌ {key}: Not found")
+        
+        for var_info in env_vars_found:
+            st.text(var_info)
+        
+        st.subheader("Loaded API Keys for Current User")
+        for key, value in api_keys.items():
+            if value:
+                masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:] if len(value) > 8 else "****" 
+                st.text(f"✅ {key}: {masked_value}")
+            else:
+                st.text(f"❌ {key}: Not loaded")
     
     # Settings
     with st.expander("🔧 Processing Settings"):
