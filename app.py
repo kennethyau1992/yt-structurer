@@ -37,6 +37,44 @@ def resolve_secret_cookiefile() -> Optional[str]:
             continue
     return None
 
+def _copy_to_tmp_if_readonly(path: str) -> str:
+    """
+    If the cookie file lives in a read-only area (like /etc/secrets or /app),
+    copy it to /tmp and return the new path. Cache the copy in session_state.
+    """
+    if not path:
+        return path
+    ro_roots = ("/etc/secrets", "/app")
+    needs_copy = any(os.path.realpath(path).startswith(root) for root in ro_roots)
+    if not needs_copy:
+        return path
+
+    # Reuse an existing copy for this session if unchanged
+    key = ("yt_cookiefile_effective", os.path.realpath(path), os.path.getmtime(path))
+    cache_key = "yt_cookiefile_cache_key"
+    cached_key = st.session_state.get(cache_key)
+    cached_path = st.session_state.get("yt_cookiefile_effective")
+
+    if cached_key == key and cached_path and os.path.exists(cached_path):
+        return cached_path
+
+    # Fresh copy to /tmp
+    os.makedirs("/tmp", exist_ok=True)
+    stamp = int(os.path.getmtime(path))
+    dest = f"/tmp/yt_cookies_{stamp}.txt"
+    try:
+        with open(path, "rb") as src, open(dest, "wb") as out:
+            out.write(src.read())
+    except Exception as e:
+        # If copy fails, fall back to original (yt-dlp only needs read access);
+        # but we avoid passing /etc/secrets if we can.
+        st.warning(f"Could not copy cookies to /tmp ({e}); using original path read-only.")
+        return path
+
+    st.session_state[cache_key] = key
+    st.session_state["yt_cookiefile_effective"] = dest
+    return dest
+
 # ============================
 # Retry
 # ============================
@@ -68,6 +106,8 @@ def humanize_yt_error(exc: Exception) -> str:
         return "Failed to load cookies. Check that YT_COOKIES_FILE points to a valid Netscape cookies.txt."
     if "could not find browser" in s or "no suitable browser" in s:
         return "Browser cookie access not available on this server. Use a Secret File instead."
+    if "Read-only file system" in s:
+        return "Your Secret File path is read-only. The app now copies cookies to /tmp automatically."
     return ""
 
 # ============================
@@ -102,13 +142,16 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
     }
 
     if cookie_mode == "cookies.txt" and cookiefile_path and os.path.exists(cookiefile_path):
-        opts["cookiefile"] = cookiefile_path
+        effective = _copy_to_tmp_if_readonly(cookiefile_path)
+        opts["cookiefile"] = effective
+        st.session_state["yt_cookiefile_effective"] = effective
     return opts
 
 def validate_cookie_mode() -> Dict[str, Any]:
     """Validate cookies.txt presence/size when required."""
     mode = st.session_state.get("cookie_mode", "none")
     cookiefile = st.session_state.get("yt_cookiefile_path")
+    effective = st.session_state.get("yt_cookiefile_effective") or cookiefile
     ok = True
     msg = None
     hints = []
@@ -132,10 +175,12 @@ def validate_cookie_mode() -> Dict[str, Any]:
             except Exception as e:
                 ok = False
                 msg = f"Could not read cookies.txt: {e}"
+        if effective and effective.startswith("/tmp"):
+            hints.append(f"Using writable copy: {effective}")
     else:
         hints.append("If YouTube gates the video, switch to cookies.txt (Secret File).")
 
-    return {"ok": ok, "message": msg, "hints": hints, "mode": mode, "cookiefile": cookiefile}
+    return {"ok": ok, "message": msg, "hints": hints, "mode": mode, "cookiefile": effective}
 
 # ============================
 # Duration via API (then probe)
@@ -337,13 +382,16 @@ def render_api_status():
     with cols[2]:
         st.markdown("**Cookies**")
         cm = st.session_state.get("cookie_mode", "none")
-        cf = st.session_state.get("yt_cookiefile_path", None)
+        cf_src = st.session_state.get("yt_cookiefile_path", None)
+        cf_eff = st.session_state.get("yt_cookiefile_effective", None)
         st.write(f"Mode: `{cm}`")
         if cm == "cookies.txt":
-            exist = bool(cf and os.path.exists(cf))
-            st.write("cookies.txt: " + ("✅ loaded" if exist else "❌ missing"))
+            exist = bool(cf_src and os.path.exists(cf_src))
+            st.write("cookies.txt (source): " + ("✅ loaded" if exist else "❌ missing"))
             if exist:
-                st.caption(f"path: {cf}")
+                st.caption(f"source: {cf_src}")
+            if cf_eff:
+                st.caption(f"using:  {cf_eff} (writable copy)")
         else:
             st.write("cookies.txt: (not used)")
     with cols[3]:
@@ -560,7 +608,7 @@ def main_app():
     colA, colB = st.columns([6,1])
     with colB:
         if st.button("Logout"):
-            for k in ["authenticated","username","api_keys","yt_cookiefile_path"]:
+            for k in ["authenticated","username","api_keys","yt_cookiefile_path","yt_cookiefile_effective","yt_cookiefile_cache_key"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -572,6 +620,11 @@ def main_app():
         st.session_state["yt_cookiefile_path"] = secret_path
     if running_on_render():
         st.session_state["cookie_mode"] = "cookies.txt" if secret_path else "none"
+
+    # If a secret path exists, precompute the effective (writable) copy
+    if st.session_state.get("yt_cookiefile_path"):
+        eff = _copy_to_tmp_if_readonly(st.session_state["yt_cookiefile_path"])
+        st.session_state["yt_cookiefile_effective"] = eff
 
     st.header("⚙️ Status & Settings")
     with st.expander("📊 API & Environment Status", expanded=True):
@@ -601,6 +654,7 @@ def main_app():
                     with open(tmp_path, "wb") as f:
                         f.write(cookiefile.read())
                     st.session_state["yt_cookiefile_path"] = tmp_path
+                    st.session_state["yt_cookiefile_effective"] = tmp_path
                     st.success("cookies.txt uploaded")
 
     st.header("🎯 Process Video")
@@ -689,6 +743,11 @@ def main():
     # Default cookie mode on Render
     if "cookie_mode" not in st.session_state:
         st.session_state.cookie_mode = "cookies.txt" if st.session_state.get("yt_cookiefile_path") else "none"
+
+    # Precompute writable copy if present
+    if st.session_state.get("yt_cookiefile_path"):
+        eff = _copy_to_tmp_if_readonly(st.session_state["yt_cookiefile_path"])
+        st.session_state["yt_cookiefile_effective"] = eff
 
     if not st.session_state.authenticated:
         login_page()
