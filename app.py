@@ -10,10 +10,9 @@ from typing import Optional, List, Dict, Any, Callable
 import requests
 import streamlit as st
 
-# ==========================================================
-# Utility: Retry wrapper
-# ==========================================================
-
+# ============================
+# Retry
+# ============================
 def with_retries(fn: Callable, tries: int = 3, base_delay: float = 0.6, max_delay: float = 2.0):
     last = None
     for i in range(tries):
@@ -26,31 +25,32 @@ def with_retries(fn: Callable, tries: int = 3, base_delay: float = 0.6, max_dela
             time.sleep(min(max_delay, base_delay * (1.7 ** i)) + random.uniform(0, 0.2))
     raise last
 
-# ==========================================================
-# Utility: Humanize yt-dlp / YouTube gate errors
-# ==========================================================
-
+# ============================
+# Error Humanizer
+# ============================
 def humanize_yt_error(exc: Exception) -> str:
     s = str(exc)
     if "Sign in to confirm you’re not a bot" in s or "Sign in to confirm you're not a bot" in s:
-        return (
-            "YouTube is gating this video. Enable one of: "
-            "1) Use cookies from your browser (Chrome/Brave/Edge/Firefox), or "
-            "2) Upload cookies.txt (Netscape format). Then retry."
-        )
+        return ("YouTube is gating this video. Enable one of: "
+                "1) Use cookies from your browser (Chrome/Brave/Edge/Firefox), or "
+                "2) Upload cookies.txt (Netscape format). Then retry.")
     if "HTTP Error 429" in s or "Too Many Requests" in s:
         return "YouTube rate-limited the request. Toggle cookies and retry, or wait a minute."
     if "This video is private" in s or "Members-only" in s:
         return "Video requires authentication (private/members-only). Use authenticated cookies from your browser."
+    if "Failed to load cookies" in s or "failed to load cookies" in s:
+        return "Failed to load cookies. Switch cookie mode or upload a valid cookies.txt, then retry."
     return ""
 
-# ==========================================================
-# Utility: yt-dlp options builder (cookies + headers) (Step 1)
-# ==========================================================
-
-def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict:
-    use_browser_cookies: bool = st.session_state.get("yt_use_browser_cookies", True)
-    browser: str = st.session_state.get("yt_browser", "chrome")
+# ============================
+# Cookie Options Builder
+# ============================
+def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
+    """
+    Build yt-dlp options using the selected cookie mode.
+    cookie_mode: 'none' | 'browser:chrome' | 'browser:brave' | 'browser:edge' | 'browser:firefox' | 'cookies.txt'
+    """
+    cookie_mode = st.session_state.get("cookie_mode", "none")
     cookiefile_path: Optional[str] = st.session_state.get("yt_cookiefile_path", None)
 
     opts: Dict[str, Any] = {
@@ -72,16 +72,19 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict:
         "retries": 3,
         "ignoreerrors": True,
     }
-    if cookiefile_path:
-        opts["cookiefile"] = cookiefile_path
-    elif use_browser_cookies:
+
+    if cookie_mode.startswith("browser:"):
+        browser = cookie_mode.split(":", 1)[1]
         opts["cookiesfrombrowser"] = (browser,)
+    elif cookie_mode == "cookies.txt" and cookiefile_path:
+        if os.path.exists(cookiefile_path):
+            opts["cookiefile"] = cookiefile_path
+    # else: none
     return opts
 
-# ==========================================================
-# Utility: YouTube duration via API first (Step 2)
-# ==========================================================
-
+# ============================
+# Duration via API (then probe)
+# ============================
 def _parse_iso8601_duration_to_seconds(s: str) -> int:
     m = re.fullmatch(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s)
     if not m:
@@ -90,6 +93,7 @@ def _parse_iso8601_duration_to_seconds(s: str) -> int:
     return h * 3600 + m_ * 60 + s_
 
 def _extract_yt_video_id(youtube_url: str) -> str:
+    # strip timestamp & other params after v=
     if "v=" in youtube_url:
         return youtube_url.split("v=")[1].split("&")[0]
     if "youtu.be/" in youtube_url:
@@ -118,7 +122,7 @@ def get_video_duration_seconds(youtube_url: str) -> int:
                 return secs
         except Exception:
             pass
-    # Fallback to yt-dlp lightweight probe
+    # Fallback: lightweight probe (with current cookie mode) — but safe to ignore failures
     def _probe():
         import yt_dlp
         opts = build_ytdlp_opts_from_session()
@@ -126,58 +130,70 @@ def get_video_duration_seconds(youtube_url: str) -> int:
             info = ydl.extract_info(youtube_url, download=False)
         return int(info.get("duration") or 0)
     try:
-        return with_retries(_probe, tries=2)
-    except Exception as e:
-        msg = humanize_yt_error(e)
-        if msg:
-            st.error(msg)
-        else:
-            st.warning(f"Could not get video duration: {e}")
+        return with_retries(_probe, tries=1)
+    except Exception:
         return 0
 
-# ==========================================================
-# Audio extraction helper (cookies-aware) (Step 1)
-# ==========================================================
-
+# ============================
+# Audio extractor (no download)
+# ============================
 class YouTubeAudioExtractor:
-    """Extract a signed, direct audio URL for AssemblyAI to fetch (no local download)."""
+    """Extract a signed audio URL. If chosen cookie mode fails to load, fall back to 'none' once."""
     def extract_audio_url(self, youtube_url: str) -> Optional[str]:
+        import yt_dlp
+        st.info("🎵 Extracting audio stream URL using yt-dlp...")
+
+        def _try_with_opts(opts):
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                if not info:
+                    raise RuntimeError("Could not extract video information")
+                formats = info.get("formats", [])
+                # Prefer audio-only
+                audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+                candidates = audio_formats or [f for f in formats if f.get("acodec") != "none"]
+                if not candidates:
+                    raise RuntimeError("No audio streams found in video")
+                candidates.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
+                best = candidates[0]
+                url = best.get("url")
+                if not url:
+                    raise RuntimeError("Stream URL missing")
+                return url
+
+        # First attempt: user-selected cookie mode
+        opts = build_ytdlp_opts_from_session()
         try:
-            import yt_dlp
-            st.info("🎵 Extracting audio stream URL using yt-dlp...")
-            opts = build_ytdlp_opts_from_session()
-            def _extract():
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
-                    if not info:
-                        raise RuntimeError("Could not extract video information")
-                    formats = info.get("formats", [])
-                    # Prefer audio-only
-                    audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-                    candidates = audio_formats or [f for f in formats if f.get("acodec") != "none"]
-                    if not candidates:
-                        raise RuntimeError("No audio streams found in video")
-                    candidates.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
-                    best = candidates[0]
-                    url = best.get("url")
-                    if not url:
-                        raise RuntimeError("Stream URL missing")
-                    st.success(f"✅ Found audio stream: {best.get('format_note', 'unknown')}")
-                    return url
-            return with_retries(_extract, tries=2)
+            url = with_retries(lambda: _try_with_opts(opts), tries=2)
+            st.success("✅ Audio URL extracted")
+            return url
         except Exception as e:
-            msg = humanize_yt_error(e)
-            if msg:
-                st.error(msg)
+            # If the failure is cookie loading related, retry with cookie_mode='none'
+            msg = str(e)
+            human = humanize_yt_error(e)
+            st.warning(human or f"First attempt failed: {msg}")
+            if "Failed to load cookies" in msg or "failed to load cookies" in msg or "could not find browser" in msg:
+                st.info("🔁 Retrying without cookies...")
+                prev_mode = st.session_state.get("cookie_mode", "none")
+                try:
+                    st.session_state["cookie_mode"] = "none"
+                    url = with_retries(lambda: _try_with_opts(build_ytdlp_opts_from_session()), tries=1)
+                    st.session_state["cookie_mode"] = prev_mode  # restore
+                    st.success("✅ Audio URL extracted (no cookies)")
+                    return url
+                except Exception as e2:
+                    st.session_state["cookie_mode"] = prev_mode
+                    # Show humanized message (likely bot-gate now)
+                    human2 = humanize_yt_error(e2)
+                    st.error(human2 or f"Audio extraction failed: {e2}")
+                    return None
             else:
-                st.error(f"❌ Audio extraction error: {e}")
-            st.error(f"URL: {youtube_url}")
-            return None
+                st.error(human or f"❌ Audio extraction error: {e}")
+                return None
 
-# ==========================================================
-# AssemblyAI client (stream-only: remote URL ingest) (Step 3 revised)
-# ==========================================================
-
+# ============================
+# AssemblyAI (remote URL)
+# ============================
 A2_BASE = "https://api.assemblyai.com/v2"
 
 def _aai_key() -> str:
@@ -188,15 +204,8 @@ def _aai_key() -> str:
 
 def assemblyai_start_and_wait(audio_url: str, language_code: str = "en", **kwargs) -> Optional[str]:
     headers = {"authorization": _aai_key(), "content-type": "application/json"}
-    payload = {
-        "audio_url": audio_url,
-        "punctuate": True,
-        "format_text": True,
-        "language_code": language_code,
-    }
+    payload = {"audio_url": audio_url, "punctuate": True, "format_text": True, "language_code": language_code}
     payload.update(kwargs)
-    # Submit
-    st.info("📤 Submitting transcription request to AssemblyAI (remote URL).")
     r = requests.post(f"{A2_BASE}/transcript", headers=headers, json=payload, timeout=30)
     if r.status_code != 200:
         try:
@@ -229,28 +238,63 @@ def assemblyai_start_and_wait(audio_url: str, language_code: str = "en", **kwarg
             st.error(f"❌ AssemblyAI error: {data.get('error')}")
             return None
 
-# ==========================================================
-# Preflight checks (Step 6; ffmpeg not required anymore)
-# ==========================================================
-
-def preflight_checks() -> dict:
-    out = {
-        "yt_dlp": False,
-        "YT_API_KEY": bool((st.session_state.get("api_keys", {}) or {}).get("youtube") or os.getenv("YT_API_KEY")),
-        "ASSEMBLYAI_API_KEY": bool((st.session_state.get("api_keys", {}) or {}).get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY")),
-        "browser_cookies": st.session_state.get("yt_browser", "chrome"),
-    }
+# ============================
+# Preflight + API Status (REDO)
+# ============================
+def safe_import(name: str):
     try:
-        __import__("yt_dlp")
-        out["yt_dlp"] = True
+        mod = __import__(name)
+        return mod, getattr(mod, "__version__", "unknown")
     except Exception:
-        pass
-    return out
+        return None, None
 
-# ==========================================================
-# Providers (Supadata + YouTube auto-captions) (Step 5)
-# ==========================================================
+def render_api_status():
+    # Robust key getter
+    keys = (st.session_state.get("api_keys") or {}) if isinstance(st.session_state.get("api_keys"), dict) else {}
+    supa_ok = bool(keys.get("supadata") or os.getenv("SUPADATA_API_KEY") or os.getenv("ADMIN_SUPADATA_KEY"))
+    aai_ok = bool(keys.get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY") or os.getenv("ADMIN_ASSEMBLYAI_KEY"))
+    ds_ok  = bool(keys.get("deepseek")  or os.getenv("DEEPSEEK_API_KEY")   or os.getenv("ADMIN_DEEPSEEK_KEY"))
+    yt_ok  = bool(keys.get("youtube")   or os.getenv("YT_API_KEY")         or os.getenv("ADMIN_YOUTUBE_KEY") or os.getenv("YOUTUBE_API_KEY"))
 
+    yt_dlp_mod, yt_dlp_ver = safe_import("yt_dlp")
+    req_mod, req_ver = safe_import("requests")
+    st_mod, st_ver = safe_import("streamlit")
+
+    cookie_mode = st.session_state.get("cookie_mode", "none")
+    cookiefile = st.session_state.get("yt_cookiefile_path", None)
+    cookiefile_ok = bool(cookiefile and os.path.exists(cookiefile))
+
+    cols = st.columns(4)
+    with cols[0]:
+        st.markdown("**APIs**")
+        st.write("Supadata: " + ("✅" if supa_ok else "❌"))
+        st.write("AssemblyAI: " + ("✅" if aai_ok else "❌"))
+        st.write("DeepSeek: " + ("✅" if ds_ok else "❌"))
+        st.write("YouTube Data: " + ("✅" if yt_ok else "❌"))
+    with cols[1]:
+        st.markdown("**Libraries**")
+        st.write(f"yt-dlp: {'✅ '+yt_dlp_ver if yt_dlp_mod else '❌'}")
+        st.write(f"requests: {'✅ '+req_ver if req_mod else '❌'}")
+        st.write(f"streamlit: {'✅ '+st_ver if st_mod else '❌'}")
+    with cols[2]:
+        st.markdown("**Cookies**")
+        st.write(f"Mode: `{cookie_mode}`")
+        if cookie_mode == "cookies.txt":
+            st.write("cookies.txt: " + ("✅ file loaded" if cookiefile_ok else "❌ missing"))
+        else:
+            st.write("cookies.txt: (not used)")
+    with cols[3]:
+        st.markdown("**Notes**")
+        if cookie_mode.startswith("browser:"):
+            st.caption("Browser cookies require local browser profile access. If it fails, switch to cookies.txt.")
+        elif cookie_mode == "cookies.txt" and not cookiefile_ok:
+            st.caption("Upload a valid Netscape cookies.txt (yt-dlp wiki has instructions).")
+        else:
+            st.caption("If YouTube gates the video, enable cookies.")
+
+# ============================
+# Providers (Supadata + YouTube auto-captions)
+# ============================
 class TranscriptProvider:
     def get_transcript(self, url: str, language: str) -> Optional[str]:
         raise NotImplementedError
@@ -270,7 +314,6 @@ class SupadataTranscriptProvider(TranscriptProvider):
             return None
         try:
             resp = self.client.transcript(url=url, lang=language, text=True, mode="auto")
-            # normalize
             if isinstance(resp, str):
                 return resp
             if isinstance(resp, dict) and "text" in resp:
@@ -308,10 +351,9 @@ class CompositeTranscriptProvider(TranscriptProvider):
                 return t
         return None
 
-# ==========================================================
-# LLM (DeepSeek) for structuring (unchanged)
-# ==========================================================
-
+# ============================
+# LLM (DeepSeek)
+# ============================
 class LLMProvider:
     def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
         raise NotImplementedError
@@ -324,38 +366,32 @@ class DeepSeekProvider(LLMProvider):
         self.temperature = temperature
 
     def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
-        try:
-            endpoint = self.base_url + "/chat/completions"
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
-            payload = {
-                "model": self.model,
-                "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": transcript}],
-                "temperature": self.temperature,
-            }
-            resp = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=180)
-            if resp.status_code != 200:
-                try:
-                    detail = resp.json().get("error", {}).get("message", resp.text)
-                except Exception:
-                    detail = resp.text
-                raise RuntimeError(f"DeepSeek API error {resp.status_code}: {detail}")
-            data = resp.json()
-            choices = data.get("choices", [])
-            if not choices:
-                raise RuntimeError("DeepSeek API returned no choices")
-            content = choices[0]["message"]["content"]
-            if not content:
-                raise RuntimeError("DeepSeek API returned empty content")
-            return content.strip()
-        except requests.exceptions.Timeout:
-            raise RuntimeError("DeepSeek API request timed out after 180 seconds")
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"DeepSeek API network error: {str(e)}")
+        endpoint = self.base_url + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": transcript}],
+            "temperature": self.temperature,
+        }
+        resp = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=180)
+        if resp.status_code != 200:
+            try:
+                detail = resp.json().get("error", {}).get("message", resp.text)
+            except Exception:
+                detail = resp.text
+            raise RuntimeError(f"DeepSeek API error {resp.status_code}: {detail}")
+        data = resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            raise RuntimeError("DeepSeek API returned no choices")
+        content = choices[0]["message"]["content"]
+        if not content:
+            raise RuntimeError("DeepSeek API returned empty content")
+        return content.strip()
 
-# ==========================================================
+# ============================
 # Orchestrator
-# ==========================================================
-
+# ============================
 class TranscriptOrchestrator:
     def __init__(self, transcript_provider: TranscriptProvider, asr_fallback: bool, assemblyai_enabled: bool):
         self.transcript_provider = transcript_provider
@@ -372,7 +408,7 @@ class TranscriptOrchestrator:
         if not self.asr_fallback:
             st.warning("❌ No official captions found and ASR fallback disabled")
             return None
-        if not (st.session_state.get("api_keys", {}) or {}).get("assemblyai"):
+        if not (st.session_state.get("api_keys", {}) or {}).get("assemblyai") and not os.getenv("ASSEMBLYAI_API_KEY"):
             st.error("❌ AssemblyAI key missing")
             return None
         st.info("🎤 No official captions found. Trying ASR fallback (remote URL to AssemblyAI)...")
@@ -380,29 +416,27 @@ class TranscriptOrchestrator:
         audio_url = self.audio_extractor.extract_audio_url(url)
         if not audio_url:
             return None
-        # Try once; if 403/410 on fetch by AAI, re-extract and retry (URL may be expired)
-        result = assemblyai_start_and_wait(audio_url, language_code="en" if language=="English" else "zh")
+        # Submit and poll
+        lang_code = "en" if language == "English" else "zh"
+        result = assemblyai_start_and_wait(audio_url, language_code=lang_code)
         if result:
             return result
-        # Quick re-extract & retry
+        # If failed (e.g., signed URL expired), re-extract once
         st.info("🔁 Retrying with a fresh signed URL...")
         audio_url = self.audio_extractor.extract_audio_url(url)
         if not audio_url:
             return None
-        return assemblyai_start_and_wait(audio_url, language_code="en" if language=="English" else "zh")
+        return assemblyai_start_and_wait(audio_url, language_code=lang_code)
 
-# ==========================================================
+# ============================
 # Auth
-# ==========================================================
-
+# ============================
 class AuthManager:
     def __init__(self):
         self.users: Dict[str, Dict[str, Any]] = {}
         admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-        self.users["admin"] = {
-            "password_hash": self._hash_password(admin_password),
-            "api_keys": {"supadata": "", "assemblyai": "", "deepseek": "", "youtube": ""}
-        }
+        self.users["admin"] = {"password_hash": self._hash_password(admin_password),
+                               "api_keys": {"supadata": "", "assemblyai": "", "deepseek": "", "youtube": ""}}
         self._load_users_from_env()
 
     def _hash_password(self, password: str) -> str:
@@ -410,22 +444,20 @@ class AuthManager:
 
     def _load_users_from_env(self):
         admin_keys = self.users["admin"]["api_keys"]
-        env_mappings = {
+        env_map = {
             "ADMIN_SUPADATA_KEY": "supadata",
-            "ADMIN_ASSEMBLYAI_KEY": "assemblyai", 
+            "ADMIN_ASSEMBLYAI_KEY": "assemblyai",
             "ADMIN_DEEPSEEK_KEY": "deepseek",
             "ADMIN_YOUTUBE_KEY": "youtube",
             "SUPADATA_API_KEY": "supadata",
             "ASSEMBLYAI_API_KEY": "assemblyai",
-            "DEEPSEEK_API_KEY": "deepseek", 
+            "DEEPSEEK_API_KEY": "deepseek",
             "YOUTUBE_API_KEY": "youtube",
-            "ASSEMBLYAI_KEY": "assemblyai",
-            "DEEPSEEK_KEY": "deepseek",
+            "YT_API_KEY": "youtube",
         }
-        for env_key, api_key_name in env_mappings.items():
-            env_value = os.getenv(env_key)
-            if env_value:
-                admin_keys[api_key_name] = env_value
+        for k, v in env_map.items():
+            if os.getenv(k):
+                admin_keys[v] = os.getenv(k)
 
     def authenticate(self, username: str, password: str) -> bool:
         return username in self.users and self.users[username]["password_hash"] == self._hash_password(password)
@@ -433,113 +465,115 @@ class AuthManager:
     def get_user_api_keys(self, username: str) -> Dict[str, str]:
         return self.users.get(username, {}).get("api_keys", {})
 
-# ==========================================================
-# Streamlit UI
-# ==========================================================
-
+# ============================
+# UI
+# ============================
 def login_page():
-    st.title("🎬 YouTube Transcript Processor — Stream Only")
-    st.subheader("🔐 Login Required")
-    st.info("🔑 **Default Login:** Username: `admin` | Password: `admin123`")
+    st.title("🎬 YouTube Transcript — Stream Only (v2)")
+    st.subheader("🔐 Login")
+    st.info("🔑 **Default:** Username: `admin` | Password: `admin123`")
     with st.form("login_form"):
-        username = st.text_input("Username", value="admin")
-        password = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Login")
-        if submit:
-            if not username or not password:
+        u = st.text_input("Username", value="admin")
+        p = st.text_input("Password", type="password")
+        go = st.form_submit_button("Login")
+        if go:
+            if not u or not p:
                 st.error("Please enter both username and password")
                 return False
             auth = AuthManager()
-            if auth.authenticate(username, password):
+            if auth.authenticate(u, p):
                 st.session_state.authenticated = True
-                st.session_state.username = username
-                st.session_state.api_keys = auth.get_user_api_keys(username)
-                st.success("Login successful!")
+                st.session_state.username = u
+                st.session_state.api_keys = auth.get_user_api_keys(u)
                 st.rerun()
             else:
                 st.error("Invalid credentials")
     return False
 
 def main_app():
-    st.title("🎬 YouTube Transcript Processor — Stream Only")
-    col1, col2 = st.columns([6,1])
-    with col2:
+    st.title("🎬 YouTube Transcript — Stream Only (v2)")
+    colA, colB = st.columns([6,1])
+    with colB:
         if st.button("Logout"):
-            for k in ["authenticated","username","api_keys"]:
+            for k in ["authenticated","username","api_keys","yt_cookiefile_path"]:
                 st.session_state.pop(k, None)
             st.rerun()
 
     st.write(f"Welcome, **{st.session_state.username}**! 👋")
-    api_keys = st.session_state.get("api_keys", {})
 
-    # API status
-    st.header("⚙️ Configuration")
-    with st.expander("📊 API Status", expanded=True):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: st.success("✅ Supadata") if api_keys.get("supadata") else st.error("❌ Supadata")
-        with c2: st.success("✅ AssemblyAI") if api_keys.get("assemblyai") else st.error("❌ AssemblyAI")
-        with c3: st.success("✅ DeepSeek") if api_keys.get("deepseek") else st.error("❌ DeepSeek")
-        with c4: st.success("✅ YouTube Data") if api_keys.get("youtube") else st.error("❌ YouTube Data")
+    st.header("⚙️ Status & Settings")
+    with st.expander("📊 API & Environment Status", expanded=True):
+        render_api_status()
 
-    # Preflight
-    with st.expander("🧪 Preflight Checks", expanded=False):
-        pf = preflight_checks()
-        st.write(pf)
-
-    # Settings
-    with st.expander("🔧 Processing Settings"):
+    with st.expander("🔧 Processing Settings", expanded=True):
         col1, col2 = st.columns(2)
         with col1:
             language = st.selectbox("Language", ["English","中文"])
             use_asr_fallback = st.checkbox("Enable ASR Fallback (AssemblyAI via remote URL)", value=True)
-            st.markdown("**YouTube Access Options**")
-            st.session_state["yt_use_browser_cookies"] = st.checkbox("Use cookies from browser", value=st.session_state.get("yt_use_browser_cookies", True))
-            st.session_state["yt_browser"] = st.selectbox("Browser", ["chrome","brave","edge","firefox"], index=["chrome","brave","edge","firefox"].index(st.session_state.get("yt_browser","chrome")))
         with col2:
-            deepseek_model = st.selectbox("DeepSeek Model", ["deepseek-chat","deepseek-reasoner"], index=1)
-            temperature = st.slider("Temperature", 0.0,1.0,0.1,0.1)
+            # Cookie Mode selector
+            cookie_mode = st.selectbox(
+                "Cookie Mode",
+                ["none","browser:chrome","browser:brave","browser:edge","browser:firefox","cookies.txt"],
+                index=["none","browser:chrome","browser:brave","browser:edge","browser:firefox","cookies.txt"].index(st.session_state.get("cookie_mode","none"))
+            )
+            st.session_state["cookie_mode"] = cookie_mode
             cookiefile = st.file_uploader("Upload cookies.txt (optional)", type=["txt"])
             if cookiefile is not None:
+                # Save to tmp
                 tmp_path = os.path.join(os.path.expanduser("~"), f".cookies_{int(time.time())}.txt")
                 with open(tmp_path, "wb") as f:
                     f.write(cookiefile.read())
                 st.session_state["yt_cookiefile_path"] = tmp_path
-                st.success("Cookies file uploaded")
+                st.success("cookies.txt uploaded")
 
-    # Input
     st.header("🎯 Process Video")
-    video_url = st.text_input("YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
-    default_prompts = {
-        "English": """You are an expert at analyzing and structuring YouTube video transcripts. Convert raw transcript text into a well-organized, readable document with clear sections, fixed punctuation, and preserved meaning. Use markdown headers and add timestamps at natural transitions.""",
-        "中文": """你是专业的YouTube转录结构化专家。把原始转录整理成结构清晰、易读的文档：分章节、修正标点、保留原意，使用Markdown标题，并在自然转换处加入时间戳。"""
-    }
-    system_prompt = st.text_area("System Prompt", value=default_prompts[language], height=180)
+    url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
 
-    if st.button("🚀 Start Processing", type="primary"):
-        if not video_url:
-            st.error("Please provide a YouTube URL")
-            st.stop()
-        if not api_keys.get("supadata") and not api_keys.get("assemblyai"):
+    default_prompts = {
+        "English": "You are an expert at structuring YouTube transcripts. Use clear sections and markdown, fix punctuation, preserve meaning, add timestamps at natural transitions.",
+        "中文": "你是YouTube轉錄結構化專家。請用清晰章節與Markdown，修正標點，保留原意，在自然轉場處加入時間戳。"
+    }
+    system_prompt = st.text_area("System Prompt", value=default_prompts[language], height=140)
+
+    # LLM settings
+    colL, colR = st.columns(2)
+    with colL:
+        deepseek_model = st.selectbox("DeepSeek Model", ["deepseek-chat","deepseek-reasoner"], index=1)
+    with colR:
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.1)
+
+    if st.button("🚀 Start", type="primary"):
+        keys = st.session_state.get("api_keys") or {}
+        if not (keys.get("supadata") or os.getenv("SUPADATA_API_KEY") or os.getenv("ADMIN_SUPADATA_KEY")
+                or keys.get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY") or os.getenv("ADMIN_ASSEMBLYAI_KEY")):
             st.error("❌ No transcript providers available (Supadata or AssemblyAI). Configure API keys.")
             st.stop()
-        if not api_keys.get("deepseek"):
+        if not (keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY") or os.getenv("ADMIN_DEEPSEEK_KEY")):
             st.error("❌ DeepSeek API key required for structuring.")
+            st.stop()
+        if not url:
+            st.error("Please provide a YouTube URL")
             st.stop()
 
         # Providers
-        supadata = SupadataTranscriptProvider(api_keys.get("supadata",""))
+        supa_key = keys.get("supadata") or os.getenv("SUPADATA_API_KEY") or os.getenv("ADMIN_SUPADATA_KEY", "")
+        aai_key = keys.get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY") or os.getenv("ADMIN_ASSEMBLYAI_KEY", "")
+        ds_key  = keys.get("deepseek")  or os.getenv("DEEPSEEK_API_KEY")   or os.getenv("ADMIN_DEEPSEEK_KEY", "")
+
+        supadata = SupadataTranscriptProvider(supa_key)
         yt_auto = YouTubeTranscriptAPIProvider()
         primary = CompositeTranscriptProvider([supadata, yt_auto])
-        orch = TranscriptOrchestrator(primary, asr_fallback=use_asr_fallback, assemblyai_enabled=bool(api_keys.get("assemblyai")))
+        orch = TranscriptOrchestrator(primary, asr_fallback=use_asr_fallback, assemblyai_enabled=bool(aai_key))
 
-        # Duration (log only)
-        secs = get_video_duration_seconds(video_url)
+        # Duration (best-effort)
+        secs = get_video_duration_seconds(url)
         if secs:
             st.info(f"🕒 Video duration: {secs//60}m {secs%60}s")
 
         # Get transcript
         with st.spinner("🔍 Getting transcript..."):
-            transcript = orch.get_transcript(video_url, language)
+            transcript = orch.get_transcript(url, language)
         if not transcript:
             st.error("❌ Failed to get transcript")
             st.stop()
@@ -548,27 +582,29 @@ def main_app():
             st.text_area("Transcript", transcript[:2000]+"..." if len(transcript)>2000 else transcript, height=240)
 
         # LLM structure
-        ds = DeepSeekProvider(api_keys.get("deepseek",""), "https://api.deepseek.com/v1", deepseek_model, temperature)
+        ds = DeepSeekProvider(ds_key, "https://api.deepseek.com/v1", deepseek_model, temperature)
         with st.spinner("🤖 Structuring transcript with LLM..."):
-            structured = ds.structure_transcript(transcript, system_prompt)
-        if not structured:
-            st.error("❌ Failed to structure transcript")
-            st.stop()
+            try:
+                structured = ds.structure_transcript(transcript, system_prompt)
+            except Exception as e:
+                st.error(f"DeepSeek error: {e}")
+                st.stop()
 
-        st.success("✅ Processing completed!")
+        st.success("✅ Completed!")
         with st.expander("📋 Structured Transcript", expanded=True):
             st.markdown(structured)
         st.download_button("💾 Download Raw Transcript", transcript, file_name="raw_transcript.txt", mime="text/plain")
         st.download_button("📄 Download Structured Transcript", structured, file_name="structured_transcript.md", mime="text/markdown")
 
-# ==========================================================
-# MAIN
-# ==========================================================
-
+# ============================
+# Main
+# ============================
 def main():
-    st.set_page_config(page_title="YouTube Transcript (Stream Only)", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="YouTube Transcript — Stream Only (v2)", page_icon="🎬", layout="wide")
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+    if "cookie_mode" not in st.session_state:
+        st.session_state.cookie_mode = "none"
     if not st.session_state.authenticated:
         login_page()
     else:
