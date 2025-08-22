@@ -13,7 +13,7 @@ import streamlit as st
 # ============================
 # Retry
 # ============================
-def with_retries(fn: Callable, tries: int = 3, base_delay: float = 0.6, max_delay: float = 2.0):
+def with_retries(fn: Callable, tries: int = 2, base_delay: float = 0.6, max_delay: float = 2.0):
     last = None
     for i in range(tries):
         try:
@@ -40,10 +40,12 @@ def humanize_yt_error(exc: Exception) -> str:
         return "Video requires authentication (private/members-only). Use authenticated cookies from your browser."
     if "Failed to load cookies" in s or "failed to load cookies" in s:
         return "Failed to load cookies. Switch cookie mode or upload a valid cookies.txt, then retry."
+    if "could not find browser" in s or "no suitable browser" in s:
+        return "Browser cookie access failed. Try another browser option or use cookies.txt."
     return ""
 
 # ============================
-# Cookie Options Builder
+# Cookie Options & Validation
 # ============================
 def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
     """
@@ -57,6 +59,7 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
         "quiet": quiet,
         "noprogress": True,
         "nocheckcertificate": True,
+        "noplaylist": True,            # single-video extraction
         "source_address": "0.0.0.0",
         "http_headers": {
             "User-Agent": (
@@ -70,7 +73,6 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
         "format": "bestaudio/best",
         "ratelimit": 5_000_000,
         "retries": 3,
-        "ignoreerrors": True,
     }
 
     if cookie_mode.startswith("browser:"):
@@ -81,6 +83,42 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
             opts["cookiefile"] = cookiefile_path
     # else: none
     return opts
+
+def validate_cookie_mode() -> Dict[str, Any]:
+    """Best-effort validation to catch obvious cookie misconfig before extraction."""
+    mode = st.session_state.get("cookie_mode", "none")
+    cookiefile = st.session_state.get("yt_cookiefile_path")
+    ok = True
+    msg = None
+    hints = []
+
+    if mode == "cookies.txt":
+        if not cookiefile or not os.path.exists(cookiefile):
+            ok = False
+            msg = "cookies.txt selected but no file is loaded."
+            hints.append("Upload a Netscape cookies.txt exported from your browser.")
+        else:
+            try:
+                size = os.path.getsize(cookiefile)
+                if size < 50:
+                    ok = False
+                    msg = "cookies.txt appears empty or too small."
+                else:
+                    with open(cookiefile, "r", encoding="utf-8", errors="ignore") as f:
+                        head = f.read(2048)
+                    if ".youtube.com" not in head and "youtube" not in head.lower():
+                        hints.append("cookies.txt does not mention youtube; make sure you exported from a YouTube-signed-in session.")
+            except Exception as e:
+                ok = False
+                msg = f"Could not read cookies.txt: {e}"
+    elif mode.startswith("browser:"):
+        # We cannot fully verify access until yt-dlp runs; warn if likely problems
+        # Users on sandboxed envs often cannot use browser cookies.
+        hints.append("Browser cookies require local browser profile access; may fail in containers/servers.")
+    else:
+        hints.append("If YouTube gates the video, switch to browser cookies or cookies.txt.")
+
+    return {"ok": ok, "message": msg, "hints": hints, "mode": mode, "cookiefile": cookiefile}
 
 # ============================
 # Duration via API (then probe)
@@ -114,7 +152,7 @@ def get_duration_via_youtube_api(youtube_url: str, api_key: Optional[str]) -> in
     return _parse_iso8601_duration_to_seconds(iso)
 
 def get_video_duration_seconds(youtube_url: str) -> int:
-    yt_api_key = st.session_state.get("api_keys", {}).get("youtube", "") or os.getenv("YT_API_KEY", "")
+    yt_api_key = st.session_state.get("api_keys", {}).get("youtube", "") or os.getenv("YT_API_KEY", "") or os.getenv("YOUTUBE_API_KEY", "")
     if yt_api_key:
         try:
             secs = get_duration_via_youtube_api(youtube_url, yt_api_key)
@@ -122,7 +160,7 @@ def get_video_duration_seconds(youtube_url: str) -> int:
                 return secs
         except Exception:
             pass
-    # Fallback: lightweight probe (with current cookie mode) — but safe to ignore failures
+    # Fallback: lightweight probe (with current cookie mode) — best-effort only
     def _probe():
         import yt_dlp
         opts = build_ytdlp_opts_from_session()
@@ -135,61 +173,85 @@ def get_video_duration_seconds(youtube_url: str) -> int:
         return 0
 
 # ============================
-# Audio extractor (no download)
+# Audio extractor (no download) with better error surfacing
 # ============================
 class YouTubeAudioExtractor:
-    """Extract a signed audio URL. If chosen cookie mode fails to load, fall back to 'none' once."""
-    def extract_audio_url(self, youtube_url: str) -> Optional[str]:
+    """Extract a signed audio URL; smart fallback between cookie modes to surface real cause."""
+    def _extract_core(self, youtube_url: str, opts: Dict[str, Any]) -> str:
         import yt_dlp
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(youtube_url, download=False)
+            if not info:
+                raise RuntimeError("yt-dlp returned no info (possible gate or outdated yt-dlp).")
+            formats = info.get("formats", [])
+            audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
+            candidates = audio_formats or [f for f in formats if f.get("acodec") != "none"]
+            if not candidates:
+                raise RuntimeError("No audio streams found in video (may be live/age-gated/region-locked).")
+            candidates.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
+            best = candidates[0]
+            url = best.get("url")
+            if not url:
+                raise RuntimeError("Stream URL missing in selected format.")
+            return url
+
+    def extract_audio_url(self, youtube_url: str) -> Optional[str]:
         st.info("🎵 Extracting audio stream URL using yt-dlp...")
-
-        def _try_with_opts(opts):
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-                if not info:
-                    raise RuntimeError("Could not extract video information")
-                formats = info.get("formats", [])
-                # Prefer audio-only
-                audio_formats = [f for f in formats if f.get("acodec") != "none" and f.get("vcodec") == "none"]
-                candidates = audio_formats or [f for f in formats if f.get("acodec") != "none"]
-                if not candidates:
-                    raise RuntimeError("No audio streams found in video")
-                candidates.sort(key=lambda x: x.get("abr", 0) or 0, reverse=True)
-                best = candidates[0]
-                url = best.get("url")
-                if not url:
-                    raise RuntimeError("Stream URL missing")
-                return url
-
-        # First attempt: user-selected cookie mode
-        opts = build_ytdlp_opts_from_session()
+        # First attempt: user-selected mode
+        user_opts = build_ytdlp_opts_from_session()
         try:
-            url = with_retries(lambda: _try_with_opts(opts), tries=2)
+            url = with_retries(lambda: self._extract_core(youtube_url, user_opts), tries=2)
             st.success("✅ Audio URL extracted")
             return url
-        except Exception as e:
-            # If the failure is cookie loading related, retry with cookie_mode='none'
-            msg = str(e)
-            human = humanize_yt_error(e)
-            st.warning(human or f"First attempt failed: {msg}")
-            if "Failed to load cookies" in msg or "failed to load cookies" in msg or "could not find browser" in msg:
-                st.info("🔁 Retrying without cookies...")
-                prev_mode = st.session_state.get("cookie_mode", "none")
+        except Exception as e1:
+            human = humanize_yt_error(e1)
+            st.warning(human or f"First attempt failed: {e1}")
+
+            # Smart second attempt:
+            # If first mode was 'none' and we have a cookie option available, try with cookies.
+            # If first mode was cookies and failed to load, try without cookies.
+            mode = st.session_state.get("cookie_mode", "none")
+            cookiefile = st.session_state.get("yt_cookiefile_path")
+
+            # Try cookies if we started with none
+            if mode == "none":
+                # Prefer cookies.txt if present, else browser:chrome
+                if cookiefile and os.path.exists(cookiefile):
+                    st.info("🔁 Retrying with cookies.txt...")
+                    st.session_state["cookie_mode"] = "cookies.txt"
+                else:
+                    st.info("🔁 Retrying with browser:chrome cookies...")
+                    st.session_state["cookie_mode"] = "browser:chrome"
                 try:
-                    st.session_state["cookie_mode"] = "none"
-                    url = with_retries(lambda: _try_with_opts(build_ytdlp_opts_from_session()), tries=1)
-                    st.session_state["cookie_mode"] = prev_mode  # restore
-                    st.success("✅ Audio URL extracted (no cookies)")
+                    cookie_opts = build_ytdlp_opts_from_session()
+                    url = with_retries(lambda: self._extract_core(youtube_url, cookie_opts), tries=1)
+                    st.success("✅ Audio URL extracted with cookies")
                     return url
                 except Exception as e2:
-                    st.session_state["cookie_mode"] = prev_mode
-                    # Show humanized message (likely bot-gate now)
+                    st.session_state["cookie_mode"] = mode  # restore
                     human2 = humanize_yt_error(e2)
-                    st.error(human2 or f"Audio extraction failed: {e2}")
+                    st.error(human2 or f"❌ Audio extraction error: {e2}")
                     return None
-            else:
-                st.error(human or f"❌ Audio extraction error: {e}")
-                return None
+
+            # Try without cookies if cookies failed to load
+            if "Failed to load cookies" in str(e1) or "could not find browser" in str(e1):
+                st.info("🔁 Retrying without cookies...")
+                prev = st.session_state.get("cookie_mode", "none")
+                try:
+                    st.session_state["cookie_mode"] = "none"
+                    no_cookie_opts = build_ytdlp_opts_from_session()
+                    url = with_retries(lambda: self._extract_core(youtube_url, no_cookie_opts), tries=1)
+                    st.success("✅ Audio URL extracted (no cookies)")
+                    return url
+                except Exception as e3:
+                    st.session_state["cookie_mode"] = prev
+                    human3 = humanize_yt_error(e3)
+                    st.error(human3 or f"❌ Audio extraction error: {e3}")
+                    return None
+
+            # Otherwise, surface the humanized reason from the first failure
+            st.error(human or f"❌ Audio extraction error: {e1}")
+            return None
 
 # ============================
 # AssemblyAI (remote URL)
@@ -197,7 +259,7 @@ class YouTubeAudioExtractor:
 A2_BASE = "https://api.assemblyai.com/v2"
 
 def _aai_key() -> str:
-    key = (st.session_state.get("api_keys", {}) or {}).get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY", "")
+    key = (st.session_state.get("api_keys", {}) or {}).get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY", "") or os.getenv("ADMIN_ASSEMBLYAI_KEY", "")
     if not key:
         raise RuntimeError("ASSEMBLYAI_API_KEY not set")
     return key
@@ -239,7 +301,7 @@ def assemblyai_start_and_wait(audio_url: str, language_code: str = "en", **kwarg
             return None
 
 # ============================
-# Preflight + API Status (REDO)
+# API Status (robust)
 # ============================
 def safe_import(name: str):
     try:
@@ -260,10 +322,6 @@ def render_api_status():
     req_mod, req_ver = safe_import("requests")
     st_mod, st_ver = safe_import("streamlit")
 
-    cookie_mode = st.session_state.get("cookie_mode", "none")
-    cookiefile = st.session_state.get("yt_cookiefile_path", None)
-    cookiefile_ok = bool(cookiefile and os.path.exists(cookiefile))
-
     cols = st.columns(4)
     with cols[0]:
         st.markdown("**APIs**")
@@ -278,19 +336,24 @@ def render_api_status():
         st.write(f"streamlit: {'✅ '+st_ver if st_mod else '❌'}")
     with cols[2]:
         st.markdown("**Cookies**")
-        st.write(f"Mode: `{cookie_mode}`")
-        if cookie_mode == "cookies.txt":
-            st.write("cookies.txt: " + ("✅ file loaded" if cookiefile_ok else "❌ missing"))
+        cm = st.session_state.get("cookie_mode", "none")
+        cf = st.session_state.get("yt_cookiefile_path", None)
+        st.write(f"Mode: `{cm}`")
+        if cm == "cookies.txt":
+            exist = bool(cf and os.path.exists(cf))
+            st.write("cookies.txt: " + ("✅ loaded" if exist else "❌ missing"))
         else:
             st.write("cookies.txt: (not used)")
     with cols[3]:
-        st.markdown("**Notes**")
-        if cookie_mode.startswith("browser:"):
-            st.caption("Browser cookies require local browser profile access. If it fails, switch to cookies.txt.")
-        elif cookie_mode == "cookies.txt" and not cookiefile_ok:
-            st.caption("Upload a valid Netscape cookies.txt (yt-dlp wiki has instructions).")
+        st.markdown("**Cookie Check**")
+        v = validate_cookie_mode()
+        if v["ok"] and not v["message"]:
+            st.success("✅ Looks OK")
         else:
-            st.caption("If YouTube gates the video, enable cookies.")
+            if v["message"]:
+                st.error(v["message"])
+            for h in v["hints"]:
+                st.caption("• " + h)
 
 # ============================
 # Providers (Supadata + YouTube auto-captions)
@@ -408,7 +471,7 @@ class TranscriptOrchestrator:
         if not self.asr_fallback:
             st.warning("❌ No official captions found and ASR fallback disabled")
             return None
-        if not (st.session_state.get("api_keys", {}) or {}).get("assemblyai") and not os.getenv("ASSEMBLYAI_API_KEY"):
+        if not ((st.session_state.get("api_keys", {}) or {}).get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY") or os.getenv("ADMIN_ASSEMBLYAI_KEY")):
             st.error("❌ AssemblyAI key missing")
             return None
         st.info("🎤 No official captions found. Trying ASR fallback (remote URL to AssemblyAI)...")
@@ -469,7 +532,7 @@ class AuthManager:
 # UI
 # ============================
 def login_page():
-    st.title("🎬 YouTube Transcript — Stream Only (v2)")
+    st.title("🎬 YouTube Transcript — Stream Only (v3)")
     st.subheader("🔐 Login")
     st.info("🔑 **Default:** Username: `admin` | Password: `admin123`")
     with st.form("login_form"):
@@ -491,7 +554,7 @@ def login_page():
     return False
 
 def main_app():
-    st.title("🎬 YouTube Transcript — Stream Only (v2)")
+    st.title("🎬 YouTube Transcript — Stream Only (v3)")
     colA, colB = st.columns([6,1])
     with colB:
         if st.button("Logout"):
@@ -600,7 +663,7 @@ def main_app():
 # Main
 # ============================
 def main():
-    st.set_page_config(page_title="YouTube Transcript — Stream Only (v2)", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="YouTube Transcript — Stream Only (v3)", page_icon="🎬", layout="wide")
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
     if "cookie_mode" not in st.session_state:
