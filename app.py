@@ -10,6 +10,34 @@ import requests
 import streamlit as st
 
 # ============================
+# Environment helpers
+# ============================
+def running_on_render() -> bool:
+    return bool(os.getenv("RENDER") == "true" or os.getenv("RENDER_SERVICE_ID") or os.getenv("RENDER_INSTANCE_ID"))
+
+def resolve_secret_cookiefile() -> Optional[str]:
+    """
+    Detect a cookies.txt provided via Render Secret File or env var.
+    Priority:
+      1) $YT_COOKIES_FILE (explicit)
+      2) /etc/secrets/youtube_cookies.txt (typical Secret File path)
+      3) /var/data/youtube_cookies.txt (if using a Persistent Disk)
+    Returns a valid file path if found and looks non-empty.
+    """
+    candidates = [
+        os.getenv("YT_COOKIES_FILE"),
+        "/etc/secrets/youtube_cookies.txt",
+        "/var/data/youtube_cookies.txt",
+    ]
+    for p in candidates:
+        try:
+            if p and os.path.exists(p) and os.path.getsize(p) > 50:
+                return p
+        except Exception:
+            continue
+    return None
+
+# ============================
 # Retry
 # ============================
 def with_retries(fn: Callable, tries: int = 2, base_delay: float = 0.6, max_delay: float = 2.0):
@@ -30,17 +58,16 @@ def with_retries(fn: Callable, tries: int = 2, base_delay: float = 0.6, max_dela
 def humanize_yt_error(exc: Exception) -> str:
     s = str(exc)
     if "Sign in to confirm you’re not a bot" in s or "Sign in to confirm you're not a bot" in s:
-        return ("YouTube is gating this video. Enable one of: "
-                "1) Use cookies from your browser (Chrome/Brave/Edge/Firefox), or "
-                "2) Upload cookies.txt (Netscape format). Then retry.")
+        return ("YouTube is gating this video. Provide a valid cookies.txt via a Secret File "
+                "and set YT_COOKIES_FILE to its path (e.g., /etc/secrets/youtube_cookies.txt).")
     if "HTTP Error 429" in s or "Too Many Requests" in s:
-        return "YouTube rate-limited the request. Toggle cookies and retry, or wait a minute."
+        return "YouTube rate-limited the request. Ensure cookies are present or retry later."
     if "This video is private" in s or "Members-only" in s:
         return "Video requires authentication (private/members-only). Use authenticated cookies from your browser."
     if "Failed to load cookies" in s or "failed to load cookies" in s:
-        return "Failed to load cookies. Switch cookie mode or upload a valid cookies.txt, then retry."
+        return "Failed to load cookies. Check that YT_COOKIES_FILE points to a valid Netscape cookies.txt."
     if "could not find browser" in s or "no suitable browser" in s:
-        return "Browser cookie access failed. Try another browser option or use cookies.txt."
+        return "Browser cookie access not available on this server. Use a Secret File instead."
     return ""
 
 # ============================
@@ -49,7 +76,7 @@ def humanize_yt_error(exc: Exception) -> str:
 def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
     """
     Build yt-dlp options using the selected cookie mode.
-    cookie_mode: 'none' | 'browser:chrome' | 'browser:brave' | 'browser:edge' | 'browser:firefox' | 'cookies.txt'
+    cookie_mode: 'none' | 'cookies.txt'  (browser modes are intentionally disabled on servers)
     """
     cookie_mode = st.session_state.get("cookie_mode", "none")
     cookiefile_path: Optional[str] = st.session_state.get("yt_cookiefile_path", None)
@@ -74,17 +101,12 @@ def build_ytdlp_opts_from_session(quiet: bool = True) -> Dict[str, Any]:
         "retries": 3,
     }
 
-    if cookie_mode.startswith("browser:"):
-        browser = cookie_mode.split(":", 1)[1]
-        opts["cookiesfrombrowser"] = (browser,)
-    elif cookie_mode == "cookies.txt" and cookiefile_path:
-        if os.path.exists(cookiefile_path):
-            opts["cookiefile"] = cookiefile_path
-    # else: none
+    if cookie_mode == "cookies.txt" and cookiefile_path and os.path.exists(cookiefile_path):
+        opts["cookiefile"] = cookiefile_path
     return opts
 
 def validate_cookie_mode() -> Dict[str, Any]:
-    """Best-effort validation to catch obvious cookie misconfig before extraction."""
+    """Validate cookies.txt presence/size when required."""
     mode = st.session_state.get("cookie_mode", "none")
     cookiefile = st.session_state.get("yt_cookiefile_path")
     ok = True
@@ -95,7 +117,7 @@ def validate_cookie_mode() -> Dict[str, Any]:
         if not cookiefile or not os.path.exists(cookiefile):
             ok = False
             msg = "cookies.txt selected but no file is loaded."
-            hints.append("Upload a Netscape cookies.txt exported from your browser.")
+            hints.append("Use a Render Secret File and set env YT_COOKIES_FILE to its absolute path.")
         else:
             try:
                 size = os.path.getsize(cookiefile)
@@ -106,15 +128,12 @@ def validate_cookie_mode() -> Dict[str, Any]:
                     with open(cookiefile, "r", encoding="utf-8", errors="ignore") as f:
                         head = f.read(2048)
                     if ".youtube.com" not in head and "youtube" not in head.lower():
-                        hints.append("cookies.txt does not mention youtube; make sure you exported from a YouTube-signed-in session.")
+                        hints.append("cookies.txt does not mention youtube; export while signed in to YouTube.")
             except Exception as e:
                 ok = False
                 msg = f"Could not read cookies.txt: {e}"
-    elif mode.startswith("browser:"):
-        # We cannot fully verify access until yt-dlp runs; warn if likely problems
-        hints.append("Browser cookies require local browser profile access; may fail in containers/servers.")
     else:
-        hints.append("If YouTube gates the video, switch to browser cookies or cookies.txt.")
+        hints.append("If YouTube gates the video, switch to cookies.txt (Secret File).")
 
     return {"ok": ok, "message": msg, "hints": hints, "mode": mode, "cookiefile": cookiefile}
 
@@ -171,10 +190,10 @@ def get_video_duration_seconds(youtube_url: str) -> int:
         return 0
 
 # ============================
-# Audio extractor (no download) with better error surfacing
+# Audio extractor (no download) with safe behavior
 # ============================
 class YouTubeAudioExtractor:
-    """Extract a signed audio URL; smart fallback between cookie modes to surface real cause."""
+    """Extract a signed audio URL; never crashes when cookies are missing on servers."""
     def _extract_core(self, youtube_url: str, opts: Dict[str, Any]) -> str:
         import yt_dlp
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -205,19 +224,20 @@ class YouTubeAudioExtractor:
             human = humanize_yt_error(e1)
             st.warning(human or f"First attempt failed: {e1}")
 
-            # Smart second attempt:
-            # If first mode was 'none' and we have a cookie option available, try with cookies.
-            # If first mode was cookies and failed to load, try without cookies.
             mode = st.session_state.get("cookie_mode", "none")
             cookiefile = st.session_state.get("yt_cookiefile_path")
 
-            # Try cookies if we started with none
-            if mode == "none":
-                if cookiefile and os.path.exists(cookiefile):
-                    st.info("🔁 Retrying with cookies.txt...")
-                    st.session_state["cookie_mode"] = "cookies.txt"
-                else:
-                    raise RuntimeError("No cookies available on server. Provide cookies.txt via a Secret File on Render.")
+            # If gating AND no cookies are available, stop gracefully with guidance
+            if mode == "none" and not (cookiefile and os.path.exists(cookiefile)):
+                st.error("🚫 This video appears gated by YouTube and no cookies are available on this server.\n\n"
+                         "👉 Add a Secret File at **/etc/secrets/youtube_cookies.txt** containing your Netscape cookies.txt,\n"
+                         "then (optionally) set env **YT_COOKIES_FILE=/etc/secrets/youtube_cookies.txt** and redeploy.")
+                return None
+
+            # If cookies are present but we were in 'none', retry with cookies.txt
+            if mode == "none" and cookiefile and os.path.exists(cookiefile):
+                st.info("🔁 Retrying with cookies.txt...")
+                st.session_state["cookie_mode"] = "cookies.txt"
                 try:
                     cookie_opts = build_ytdlp_opts_from_session()
                     url = with_retries(lambda: self._extract_core(youtube_url, cookie_opts), tries=1)
@@ -229,23 +249,7 @@ class YouTubeAudioExtractor:
                     st.error(human2 or f"❌ Audio extraction error: {e2}")
                     return None
 
-            # Try without cookies if cookies failed to load
-            if "Failed to load cookies" in str(e1) or "could not find browser" in str(e1):
-                st.info("🔁 Retrying without cookies...")
-                prev = st.session_state.get("cookie_mode", "none")
-                try:
-                    st.session_state["cookie_mode"] = "none"
-                    no_cookie_opts = build_ytdlp_opts_from_session()
-                    url = with_retries(lambda: self._extract_core(youtube_url, no_cookie_opts), tries=1)
-                    st.success("✅ Audio URL extracted (no cookies)")
-                    return url
-                except Exception as e3:
-                    st.session_state["cookie_mode"] = prev
-                    human3 = humanize_yt_error(e3)
-                    st.error(human3 or f"❌ Audio extraction error: {e3}")
-                    return None
-
-            # Otherwise, surface the humanized reason from the first failure
+            # If we were already in cookies mode, surface message and stop
             st.error(human or f"❌ Audio extraction error: {e1}")
             return None
 
@@ -307,7 +311,7 @@ def safe_import(name: str):
         return None, None
 
 def render_api_status():
-    # Robust key getter
+    # Keys
     keys = (st.session_state.get("api_keys") or {}) if isinstance(st.session_state.get("api_keys"), dict) else {}
     supa_ok = bool(keys.get("supadata") or os.getenv("SUPADATA_API_KEY") or os.getenv("ADMIN_SUPADATA_KEY"))
     aai_ok = bool(keys.get("assemblyai") or os.getenv("ASSEMBLYAI_API_KEY") or os.getenv("ADMIN_ASSEMBLYAI_KEY"))
@@ -338,6 +342,8 @@ def render_api_status():
         if cm == "cookies.txt":
             exist = bool(cf and os.path.exists(cf))
             st.write("cookies.txt: " + ("✅ loaded" if exist else "❌ missing"))
+            if exist:
+                st.caption(f"path: {cf}")
         else:
             st.write("cookies.txt: (not used)")
     with cols[3]:
@@ -528,7 +534,7 @@ class AuthManager:
 # UI
 # ============================
 def login_page():
-    st.title("🎬 YouTube Transcript — Stream Only (v3)")
+    st.title("🎬 YouTube Transcript — Stream Only (Render-safe)")
     st.subheader("🔐 Login")
     st.info("🔑 **Default:** Username: `admin` | Password: `admin123`")
     with st.form("login_form"):
@@ -550,7 +556,7 @@ def login_page():
     return False
 
 def main_app():
-    st.title("🎬 YouTube Transcript — Stream Only (v3)")
+    st.title("🎬 YouTube Transcript — Stream Only (Render-safe)")
     colA, colB = st.columns([6,1])
     with colB:
         if st.button("Logout"):
@@ -559,6 +565,13 @@ def main_app():
             st.rerun()
 
     st.write(f"Welcome, **{st.session_state.username}**! 👋")
+
+    # Detect and set cookie defaults for Render
+    secret_path = resolve_secret_cookiefile()
+    if secret_path and not st.session_state.get("yt_cookiefile_path"):
+        st.session_state["yt_cookiefile_path"] = secret_path
+    if running_on_render():
+        st.session_state["cookie_mode"] = "cookies.txt" if secret_path else "none"
 
     st.header("⚙️ Status & Settings")
     with st.expander("📊 API & Environment Status", expanded=True):
@@ -570,21 +583,25 @@ def main_app():
             language = st.selectbox("Language", ["English","中文"])
             use_asr_fallback = st.checkbox("Enable ASR Fallback (AssemblyAI via remote URL)", value=True)
         with col2:
-            # Cookie Mode selector
-            cookie_mode = st.selectbox(
-                "Cookie Mode",
-                ["none","browser:chrome","browser:brave","browser:edge","browser:firefox","cookies.txt"],
-                index=["none","browser:chrome","browser:brave","browser:edge","browser:firefox","cookies.txt"].index(st.session_state.get("cookie_mode","none"))
-            )
+            # On Render, we only show 'cookies.txt' or 'none'
+            if running_on_render():
+                cookie_choices = ["cookies.txt","none"]
+            else:
+                cookie_choices = ["none","cookies.txt"]
+            current_choice = st.session_state.get("cookie_mode", "cookies.txt" if secret_path else "none")
+            cookie_mode = st.selectbox("Cookie Mode", cookie_choices,
+                                       index=cookie_choices.index(current_choice) if current_choice in cookie_choices else 0)
             st.session_state["cookie_mode"] = cookie_mode
-            cookiefile = st.file_uploader("Upload cookies.txt (optional)", type=["txt"])
-            if cookiefile is not None:
-                # Save to tmp
-                tmp_path = os.path.join(os.path.expanduser("~"), f".cookies_{int(time.time())}.txt")
-                with open(tmp_path, "wb") as f:
-                    f.write(cookiefile.read())
-                st.session_state["yt_cookiefile_path"] = tmp_path
-                st.success("cookies.txt uploaded")
+
+            # If not using Secret File, allow manual upload
+            if cookie_mode == "cookies.txt" and not secret_path:
+                cookiefile = st.file_uploader("Upload cookies.txt (Netscape format)", type=["txt"])
+                if cookiefile is not None:
+                    tmp_path = os.path.join("/tmp", f"cookies_{int(time.time())}.txt")
+                    with open(tmp_path, "wb") as f:
+                        f.write(cookiefile.read())
+                    st.session_state["yt_cookiefile_path"] = tmp_path
+                    st.success("cookies.txt uploaded")
 
     st.header("🎯 Process Video")
     url = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
@@ -659,11 +676,20 @@ def main_app():
 # Main
 # ============================
 def main():
-    st.set_page_config(page_title="YouTube Transcript — Stream Only (v3)", page_icon="🎬", layout="wide")
+    st.set_page_config(page_title="YouTube Transcript — Stream Only (Render-safe)", page_icon="🎬", layout="wide")
     if "authenticated" not in st.session_state:
         st.session_state.authenticated = False
+
+    # Pre-populate cookie path from Secret File if present
+    if not st.session_state.get("yt_cookiefile_path"):
+        p = resolve_secret_cookiefile()
+        if p:
+            st.session_state["yt_cookiefile_path"] = p
+
+    # Default cookie mode on Render
     if "cookie_mode" not in st.session_state:
-        st.session_state.cookie_mode = "none"
+        st.session_state.cookie_mode = "cookies.txt" if st.session_state.get("yt_cookiefile_path") else "none"
+
     if not st.session_state.authenticated:
         login_page()
     else:
