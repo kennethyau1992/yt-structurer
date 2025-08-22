@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -113,7 +112,6 @@ def validate_cookie_mode() -> Dict[str, Any]:
                 msg = f"Could not read cookies.txt: {e}"
     elif mode.startswith("browser:"):
         # We cannot fully verify access until yt-dlp runs; warn if likely problems
-        # Users on sandboxed envs often cannot use browser cookies.
         hints.append("Browser cookies require local browser profile access; may fail in containers/servers.")
     else:
         hints.append("If YouTube gates the video, switch to browser cookies or cookies.txt.")
@@ -215,11 +213,11 @@ class YouTubeAudioExtractor:
 
             # Try cookies if we started with none
             if mode == "none":
-    if cookiefile and os.path.exists(cookiefile):
-        st.info("🔁 Retrying with cookies.txt...")
-        st.session_state["cookie_mode"] = "cookies.txt"
-    else:
-        raise RuntimeError("No cookies available on server. Provide cookies.txt via a Secret File on Render.")
+                if cookiefile and os.path.exists(cookiefile):
+                    st.info("🔁 Retrying with cookies.txt...")
+                    st.session_state["cookie_mode"] = "cookies.txt"
+                else:
+                    raise RuntimeError("No cookies available on server. Provide cookies.txt via a Secret File on Render.")
                 try:
                     cookie_opts = build_ytdlp_opts_from_session()
                     url = with_retries(lambda: self._extract_core(youtube_url, cookie_opts), tries=1)
