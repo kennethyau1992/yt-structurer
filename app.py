@@ -513,13 +513,27 @@ class SupadataTranscriptProvider(TranscriptProvider):
         """
         if resp is None:
             return ""
+        
+        # Check if it's a BatchJob object (async job that's not ready)
+        resp_str = str(resp)
+        if "BatchJob" in resp_str or "job_id" in resp_str:
+            st.warning("Supadata returned a BatchJob - transcript may be processing or unavailable")
+            return ""
 
         # Plain string already
         if isinstance(resp, str):
+            # Additional check for error strings
+            if "BatchJob" in resp or "job_id" in resp:
+                return ""
             return resp
 
         # Dict shapes: {"text": "..."} or {"chunks": [...]}
         if isinstance(resp, dict):
+            # Check for error or job status
+            if resp.get("status") == "processing" or resp.get("job_id"):
+                st.warning("Transcript is still processing")
+                return ""
+            
             t = resp.get("text")
             if isinstance(t, str):
                 return t
@@ -561,9 +575,12 @@ class SupadataTranscriptProvider(TranscriptProvider):
         if isinstance(v, str):
             return v
 
-        # Fallback stringify
+        # Fallback stringify - but check for BatchJob pattern
         try:
-            return str(resp)
+            result_str = str(resp)
+            if "BatchJob" not in result_str and "job_id" not in result_str:
+                return result_str
+            return ""
         except Exception:
             return ""
 
@@ -1160,15 +1177,50 @@ class TranscriptOrchestrator:
         st.info("Trying primary transcript provider (Supadata)...")
         transcript = self.transcript_provider.get_transcript(url, language)
         
-        # If no transcript and fallback is enabled, try ASR
+        # Validate transcript quality
+        def is_valid_transcript(text):
+            """Check if transcript is valid and substantial enough"""
+            if not text:
+                return False
+            
+            # Check if it's just an error object string
+            if "BatchJob" in str(text) or "job_id" in str(text):
+                st.warning("Received job object instead of transcript - transcript not ready or unavailable")
+                return False
+            
+            # Remove whitespace and check length
+            cleaned = text.strip()
+            if len(cleaned) < 100:  # Less than 100 characters is too short
+                st.warning(f"Transcript too short ({len(cleaned)} characters) - likely invalid")
+                return False
+            
+            # Check word count
+            word_count = len(cleaned.split())
+            if word_count < 20:  # Less than 20 words is suspiciously short
+                st.warning(f"Transcript has only {word_count} words - likely invalid")
+                return False
+            
+            return True
+        
+        # Check if transcript is valid
+        if not is_valid_transcript(transcript):
+            transcript = None
+            st.warning("Primary provider returned invalid or too short transcript")
+        
+        # If no valid transcript and fallback is enabled, try ASR
         if not transcript and use_fallback and self.asr_fallback_provider:
-            st.info("No official captions found. Trying ASR fallback (AssemblyAI with chunking)...")
+            st.info("No valid transcript from primary provider. Trying ASR fallback (AssemblyAI with chunking)...")
             transcript = self.asr_fallback_provider.get_transcript(url, language)
             
+            # Validate ASR transcript too
+            if not is_valid_transcript(transcript):
+                st.error("ASR also failed to produce a valid transcript")
+                transcript = None
+        
         if not transcript:
             st.warning("No transcript available from any provider")
         else:
-            st.success("Transcript obtained successfully")
+            st.success(f"Transcript obtained successfully ({len(transcript)} characters, {len(transcript.split())} words)")
             
         return transcript
     
