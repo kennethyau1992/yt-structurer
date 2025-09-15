@@ -15,22 +15,21 @@ class AuthManager:
     """Simple authentication manager for storing user credentials"""
     
     def __init__(self):
-        # Initialize with default admin user
-        self.users = {}
-        
-        # Create default admin user with fallback credentials
-        admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-        self.users["admin"] = {
-            "password_hash": self._hash_password(admin_password),
-            "api_keys": {
-                "supadata": "",
-                "assemblyai": "",
-                "deepseek": "",
-                "youtube": ""
+        # In production, use environment variables or a secure database
+        self.users = {
+            # Default admin user - change these credentials!
+            "admin": {
+                "password_hash": self._hash_password("admin123"),  # Change this!
+                "api_keys": {
+                    "supadata": os.getenv("ADMIN_SUPADATA_KEY", ""),
+                    "assemblyai": os.getenv("ADMIN_ASSEMBLYAI_KEY", ""),
+                    "deepseek": os.getenv("ADMIN_DEEPSEEK_KEY", ""),
+                    "youtube": os.getenv("ADMIN_YOUTUBE_KEY", "")
+                }
             }
         }
         
-        # Load API keys and additional users from environment variables
+        # Load additional users from environment variables if available
         self._load_users_from_env()
     
     def _hash_password(self, password: str) -> str:
@@ -39,64 +38,37 @@ class AuthManager:
     
     def _load_users_from_env(self):
         """Load users from environment variables"""
-        # Update admin user's API keys from environment variables
-        admin_keys = self.users["admin"]["api_keys"]
-        
-        # Direct environment variable mapping for admin user
-        env_mappings = {
-            "ADMIN_SUPADATA_KEY": "supadata",
-            "ADMIN_ASSEMBLYAI_KEY": "assemblyai", 
-            "ADMIN_DEEPSEEK_KEY": "deepseek",
-            "ADMIN_YOUTUBE_KEY": "youtube",
-            # Also support common alternative names
-            "SUPADATA_API_KEY": "supadata",
-            "ASSEMBLYAI_API_KEY": "assemblyai",
-            "DEEPSEEK_API_KEY": "deepseek", 
-            "YOUTUBE_API_KEY": "youtube",
-            "ASSEMBLYAI_KEY": "assemblyai",
-            "DEEPSEEK_KEY": "deepseek",
-        }
-        
-        for env_key, api_key_name in env_mappings.items():
-            env_value = os.getenv(env_key)
-            if env_value:
-                admin_keys[api_key_name] = env_value
-                print(f"✅ Loaded {api_key_name} API key from {env_key}")
-        
-        # Legacy support: Load users from patterned environment variables
         # Format: USER1_PASSWORD, USER1_SUPADATA_KEY, etc.
         env_users = {}
         for key, value in os.environ.items():
-            if key.endswith('_PASSWORD') and not key.startswith('ADMIN_'):
+            if key.endswith('_PASSWORD'):
                 username = key[:-9].lower()  # Remove '_PASSWORD' and lowercase
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["password_hash"] = self._hash_password(value)
-            elif key.endswith('_SUPADATA_KEY') and not key.startswith('ADMIN_'):
+            elif key.endswith('_SUPADATA_KEY'):
                 username = key[:-13].lower()  # Remove '_SUPADATA_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["supadata"] = value
-            elif key.endswith('_ASSEMBLYAI_KEY') and not key.startswith('ADMIN_'):
+            elif key.endswith('_ASSEMBLYAI_KEY'):
                 username = key[:-14].lower()  # Remove '_ASSEMBLYAI_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["assemblyai"] = value
-            elif key.endswith('_DEEPSEEK_KEY') and not key.startswith('ADMIN_'):
+            elif key.endswith('_DEEPSEEK_KEY'):
                 username = key[:-12].lower()  # Remove '_DEEPSEEK_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["deepseek"] = value
-            elif key.endswith('_YOUTUBE_KEY') and not key.startswith('ADMIN_'):
+            elif key.endswith('_YOUTUBE_KEY'):
                 username = key[:-12].lower()  # Remove '_YOUTUBE_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["youtube"] = value
         
-        # Add additional users (but don't overwrite admin)
-        for username, user_data in env_users.items():
-            if username != "admin":
-                self.users[username] = user_data
+        # Merge with existing users
+        self.users.update(env_users)
     
     def authenticate(self, username: str, password: str) -> bool:
         """Authenticate user credentials"""
@@ -1147,11 +1119,8 @@ def login_page():
     st.title("🎬 YouTube Transcript Processor")
     st.subheader("🔐 Login Required")
     
-    # Show default credentials info
-    st.info("🔑 **Default Login:** Username: `admin` | Password: `admin123`")
-    
     with st.form("login_form"):
-        username = st.text_input("Username", value="admin")
+        username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submit_button = st.form_submit_button("Login")
         
@@ -1171,30 +1140,6 @@ def login_page():
             else:
                 st.error("Invalid credentials")
                 return False
-    
-    # Debug section for login issues
-    with st.expander("🐛 Login Debug", expanded=False):
-        st.subheader("Available Users")
-        auth_manager = AuthManager()
-        
-        for user in auth_manager.users.keys():
-            st.text(f"👤 User: {user}")
-        
-        # Check admin password hash
-        admin_user = auth_manager.users.get("admin", {})
-        expected_hash = auth_manager._hash_password("admin123")
-        actual_hash = admin_user.get("password_hash", "")
-        
-        st.text(f"Expected hash (admin123): {expected_hash[:16]}...")
-        st.text(f"Actual hash: {actual_hash[:16]}...")
-        st.text(f"Hashes match: {expected_hash == actual_hash}")
-        
-        # Check if ADMIN_PASSWORD env var is set
-        env_admin_password = os.getenv("ADMIN_PASSWORD")
-        if env_admin_password:
-            st.text(f"ADMIN_PASSWORD env var is set to: {env_admin_password[:4]}****")
-        else:
-            st.text("ADMIN_PASSWORD env var not set - using default 'admin123'")
     
     return False
 
