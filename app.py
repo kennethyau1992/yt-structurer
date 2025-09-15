@@ -1470,7 +1470,25 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             
             # Show transcript preview
             with st.expander("Raw Transcript Preview"):
-                st.text_area("Transcript", transcript[:1000] + "..." if len(transcript) > 1000 else transcript, height=200)
+                # Show first 5000 characters or full transcript if shorter
+                preview_length = 5000  # Increase this for longer preview
+                preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
+                st.text_area(
+                    "Transcript", 
+                    preview_text, 
+                    height=400,  # Increased height for more content
+                    help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
+                )
+                
+                # Option to show full transcript
+                if len(transcript) > preview_length:
+                    if st.checkbox("Show full transcript", key=f"show_full_{i}"):
+                        st.text_area(
+                            "Full Transcript", 
+                            transcript, 
+                            height=600,
+                            help=f"Complete transcript ({len(transcript)} characters)"
+                        )
             
             # Step 2: Structure transcript
             with st.spinner("Structuring transcript with LLM..."):
