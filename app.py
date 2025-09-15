@@ -123,14 +123,30 @@ class YouTubeCookieManager:
         }
         
         if use_cookies:
-            # Try to use cookies from browser
-            base_opts['cookiesfrombrowser'] = (browser,)
-            
-            # Alternative: Use a cookies file if provided
-            cookies_file = os.getenv('YOUTUBE_COOKIES_FILE')
-            if cookies_file and os.path.exists(cookies_file):
-                base_opts['cookiefile'] = cookies_file
-                del base_opts['cookiesfrombrowser']  # Use file instead of browser
+            # Check for Render secret file first
+            render_cookies = '/etc/secrets/youtube_cookies.txt'
+            if os.path.exists(render_cookies):
+                st.info(f"Using Render secret cookies file: {render_cookies}")
+                base_opts['cookiefile'] = render_cookies
+            else:
+                # Check for environment variable
+                cookies_file = os.getenv('YOUTUBE_COOKIES_FILE')
+                if cookies_file and os.path.exists(cookies_file):
+                    st.info(f"Using cookies file from env: {cookies_file}")
+                    base_opts['cookiefile'] = cookies_file
+                else:
+                    # Try browser cookies (may not work on Linux/containers)
+                    import platform
+                    if platform.system() != 'Linux':
+                        base_opts['cookiesfrombrowser'] = (browser,)
+                    else:
+                        # On Linux, especially in containers, browser cookie extraction often fails
+                        st.warning("No cookies file found. Trying without authentication...")
+        
+        # Add user agent to avoid some bot detection
+        base_opts['headers'] = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         
         return base_opts
 
@@ -601,70 +617,84 @@ class YouTubeAudioExtractor:
         """
         try:
             import yt_dlp
+            import platform
             
-            st.info(f"Extracting audio stream URL using yt-dlp (trying cookies from {browser})...")
+            st.info(f"Extracting audio stream URL using yt-dlp...")
             
-            # Configure yt-dlp options with cookies
-            ydl_opts = self.cookie_manager.get_ydl_opts(use_cookies=True, browser=browser)
-            ydl_opts.update({
-                'format': 'bestaudio/best',  # Get best audio quality
-                'noplaylist': True,          # Only process single video
-            })
+            # Base options
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'noplaylist': True,
+                'quiet': True,
+                'no_warnings': True,
+                'headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            }
             
-            # Try different browsers if the first one fails
-            browsers_to_try = [browser, 'firefox', 'edge', 'safari', 'chrome']
-            browsers_to_try = list(dict.fromkeys(browsers_to_try))  # Remove duplicates while preserving order
+            # Check for Render secret cookies file first
+            render_cookies = '/etc/secrets/youtube_cookies.txt'
+            cookies_file = None
             
-            last_error = None
-            for browser_attempt in browsers_to_try:
-                try:
-                    ydl_opts['cookiesfrombrowser'] = (browser_attempt,)
+            if os.path.exists(render_cookies):
+                st.success(f"Found Render secret cookies file!")
+                cookies_file = render_cookies
+            else:
+                # Check environment variable
+                env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
+                if env_cookies and os.path.exists(env_cookies):
+                    st.info(f"Using cookies file from environment variable")
+                    cookies_file = env_cookies
+            
+            # Add cookies file if found
+            if cookies_file:
+                ydl_opts['cookiefile'] = cookies_file
+                st.info(f"Using cookies for authentication: {cookies_file}")
+            else:
+                st.warning("No cookies file found - attempting without authentication")
+            
+            # Try to extract audio
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(youtube_url, download=False)
                     
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        # Extract video info without downloading
-                        info = ydl.extract_info(youtube_url, download=False)
-                        
-                        if not info:
-                            continue
-                        
-                        # Look for the best audio stream URL
+                    if info:
                         formats = info.get('formats', [])
                         
-                        # First, try to find audio-only streams
+                        # Try to find audio-only streams
                         audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
                         
                         if audio_formats:
-                            # Sort by audio bitrate (highest first)
                             audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                             best_audio = audio_formats[0]
-                            st.success(f"Found audio-only stream using {browser_attempt} cookies: {best_audio.get('format_note', 'unknown quality')}")
+                            st.success(f"Found audio-only stream: {best_audio.get('format_note', 'unknown quality')}")
                             return best_audio.get('url')
                         
-                        # Fallback: find formats with audio (including video+audio)
+                        # Fallback: find formats with audio
                         formats_with_audio = [f for f in formats if f.get('acodec') != 'none']
                         
                         if formats_with_audio:
-                            # Sort by audio bitrate
                             formats_with_audio.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                             best_format = formats_with_audio[0]
-                            st.success(f"Found audio stream using {browser_attempt} cookies: {best_format.get('format_note', 'unknown quality')}")
+                            st.success(f"Found audio stream: {best_format.get('format_note', 'unknown quality')}")
                             return best_format.get('url')
-                
-                except Exception as e:
-                    last_error = e
-                    if "Sign in to confirm" in str(e):
-                        st.warning(f"Cookie extraction from {browser_attempt} didn't work, trying next browser...")
-                    continue
+                    
+                    st.error("No audio formats found in video")
+                    return None
             
-            # If all browsers failed, show the last error
-            if last_error:
-                st.error(f"Audio extraction failed. YouTube requires authentication. Error: {last_error}")
-                st.info("💡 **Solutions:**\n"
-                       "1. Make sure you're logged into YouTube in Chrome/Firefox\n"
-                       "2. Try a different browser in settings\n"
-                       "3. Export cookies manually (see yt-dlp documentation)")
-            
-            return None
+            except Exception as e:
+                error_msg = str(e)
+                if "Sign in to confirm" in error_msg:
+                    st.error("YouTube requires authentication - cookies may be expired or invalid")
+                    st.info("Please update your youtube_cookies.txt file in Render secrets:\n"
+                           "1. Log into YouTube in your browser\n"
+                           "2. Use 'Get cookies.txt' extension to export fresh cookies\n"
+                           "3. Update the youtube_cookies.txt secret file in Render")
+                elif "Video unavailable" in error_msg:
+                    st.error("Video is unavailable or private")
+                else:
+                    st.error(f"Error extracting audio: {error_msg}")
+                return None
                 
         except ImportError:
             st.error("yt-dlp not installed. Install with: pip install yt-dlp")
@@ -1348,9 +1378,57 @@ def main_app():
         with col3:
             browser_for_cookies = st.selectbox(
                 "Browser for YouTube Cookies",
-                ["chrome", "firefox", "edge", "safari"],
-                help="Select which browser to extract YouTube cookies from (for ASR)"
+                ["none", "chrome", "firefox", "edge", "safari"],
+                help="Select browser for cookies (use 'none' on Linux/servers)"
             )
+            
+            # Option to upload cookies file
+            st.info("For Linux/Server: Upload cookies.txt file or set YOUTUBE_COOKIES_FILE env var")
+    
+    # Cookie file upload section (for Linux/containers)
+    with st.expander("YouTube Authentication (for ASR)", expanded=False):
+        # Check for Render secret file
+        render_cookies = '/etc/secrets/youtube_cookies.txt'
+        if os.path.exists(render_cookies):
+            st.success(f"✅ Render secret cookies file found: {render_cookies}")
+            st.info("The app will automatically use this file for YouTube authentication")
+        else:
+            # Check for environment variable
+            env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
+            if env_cookies and os.path.exists(env_cookies):
+                st.success(f"✅ Cookies file from environment: {env_cookies}")
+            else:
+                st.warning("⚠️ No cookies file found in /etc/secrets/youtube_cookies.txt")
+                st.info("**To fix this on Render:**\n"
+                       "1. Export cookies from YouTube (logged in)\n"
+                       "2. Add as Secret File in Render Dashboard\n"
+                       "3. Name it: youtube_cookies.txt")
+        
+        st.markdown("---")
+        st.info("**Manual Cookie Upload (Alternative):**")
+        st.markdown("""
+        1. Install browser extension: 'Get cookies.txt' or 'cookies.txt'
+        2. Log into YouTube in your browser
+        3. Export cookies using the extension
+        4. Upload the cookies.txt file below
+        """)
+        
+        uploaded_cookies = st.file_uploader(
+            "Upload cookies.txt file (optional)",
+            type=['txt'],
+            help="Upload YouTube cookies exported from browser"
+        )
+        
+        if uploaded_cookies:
+            # Save uploaded cookies to temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                content = uploaded_cookies.read().decode('utf-8')
+                f.write(content)
+                cookies_path = f.name
+            
+            os.environ['YOUTUBE_COOKIES_FILE'] = cookies_path
+            st.success(f"Cookies file uploaded and set: {cookies_path}")
     
     # Main Processing Section
     st.header("Process Video")
