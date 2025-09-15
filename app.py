@@ -37,30 +37,34 @@ class AuthManager:
         return hashlib.sha256(password.encode()).hexdigest()
     
     def _load_users_from_env(self):
-        """Load users from environment variables"""
-        # Format: USER1_PASSWORD, USER1_SUPADATA_KEY, etc.
+        """Load users from environment variables with debug output"""
         env_users = {}
+        
         for key, value in os.environ.items():
             if key.endswith('_PASSWORD'):
                 username = key[:-9].lower()  # Remove '_PASSWORD' and lowercase
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["password_hash"] = self._hash_password(value)
+                
             elif key.endswith('_SUPADATA_KEY'):
                 username = key[:-13].lower()  # Remove '_SUPADATA_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["supadata"] = value
+                
             elif key.endswith('_ASSEMBLYAI_KEY'):
                 username = key[:-14].lower()  # Remove '_ASSEMBLYAI_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["assemblyai"] = value
+                
             elif key.endswith('_DEEPSEEK_KEY'):
                 username = key[:-12].lower()  # Remove '_DEEPSEEK_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["deepseek"] = value
+                
             elif key.endswith('_YOUTUBE_KEY'):
                 username = key[:-12].lower()  # Remove '_YOUTUBE_KEY'
                 if username not in env_users:
@@ -68,7 +72,13 @@ class AuthManager:
                 env_users[username]["api_keys"]["youtube"] = value
         
         # Merge with existing users
-        self.users.update(env_users)
+        for username, user_data in env_users.items():
+            if username in self.users:
+                # User already exists, update API keys
+                self.users[username]["api_keys"].update(user_data["api_keys"])
+            else:
+                # New user
+                self.users[username] = user_data
     
     def authenticate(self, username: str, password: str) -> bool:
         """Authenticate user credentials"""
@@ -189,7 +199,7 @@ class AudioChunker:
         if not chunks:
             return None
         
-        st.info(f"📄 Starting parallel transcription of {len(chunks)} chunks...")
+        st.info(f"Processing {len(chunks)} chunks in parallel...")
         
         def transcribe_single_chunk(chunk_info):
             """Transcribe a single chunk"""
@@ -199,7 +209,7 @@ class AudioChunker:
             audio_url = chunk_info['audio_url']
             
             try:
-                st.info(f"🎵 Chunk {chunk_id + 1}: {start_time//60}m{start_time%60}s - {end_time//60}m{end_time%60}s")
+                st.info(f"Chunk {chunk_id + 1}: {start_time//60}m{start_time%60}s - {end_time//60}m{end_time%60}s")
                 
                 # For now, we'll transcribe the full audio URL and note the time range
                 # In a full implementation, you'd need to extract the specific time range
@@ -214,7 +224,7 @@ class AudioChunker:
                 }
                 
             except Exception as e:
-                st.error(f"❌ Chunk {chunk_id + 1} failed: {e}")
+                st.error(f"Chunk {chunk_id + 1} failed: {e}")
                 return {
                     'chunk_id': chunk_id,
                     'start_time': start_time,
@@ -241,12 +251,12 @@ class AudioChunker:
                     results.append(result)
                     
                     if result['success']:
-                        st.success(f"✅ Chunk {result['chunk_id'] + 1} completed")
+                        st.success(f"Chunk {result['chunk_id'] + 1} completed")
                     else:
-                        st.error(f"❌ Chunk {result['chunk_id'] + 1} failed")
+                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
                         
                 except Exception as e:
-                    st.error(f"💥 Chunk processing error: {e}")
+                    st.error(f"Chunk processing error: {e}")
         
         # Sort results by chunk_id and combine transcripts
         results.sort(key=lambda x: x['chunk_id'])
@@ -266,16 +276,16 @@ class AudioChunker:
                 failed_chunks.append(result['chunk_id'] + 1)
         
         if not successful_transcripts:
-            st.error("❌ All chunks failed to transcribe")
+            st.error("All chunks failed to transcribe")
             return None
         
         if failed_chunks:
-            st.warning(f"⚠️ Chunks {failed_chunks} failed, but continuing with successful chunks")
+            st.warning(f"Chunks {failed_chunks} failed, but continuing with successful chunks")
         
         # Combine all successful transcripts
         combined_transcript = "\n\n".join(successful_transcripts)
         
-        st.success(f"🎉 Successfully combined {len(successful_transcripts)} chunks into final transcript")
+        st.success(f"Successfully combined {len(successful_transcripts)} chunks into final transcript")
         return combined_transcript
 
 # ==================== NEW: LLM TEXT CHUNKER ====================
@@ -339,7 +349,7 @@ class LLMTextChunker:
                 'is_single_chunk': True
             }]
         
-        st.info(f"🧩 Text is {len(text):,} characters (~{self.estimate_tokens(text):,} tokens) - chunking for better LLM processing...")
+        st.info(f"Text is {len(text):,} characters (~{self.estimate_tokens(text):,} tokens) - chunking for better LLM processing...")
         
         chunks = []
         split_points = self.find_split_points(text)
@@ -387,7 +397,7 @@ class LLMTextChunker:
             current_start = next_start
             chunk_id += 1
         
-        st.info(f"✂️ Created {len(chunks)} intelligent chunks with overlap for context preservation")
+        st.info(f"Created {len(chunks)} intelligent chunks with overlap for context preservation")
         return chunks
     
     def create_chunk_specific_prompt(self, base_system_prompt: str, chunk_info: Dict, total_chunks: int, language: str) -> str:
@@ -542,7 +552,7 @@ class YouTubeAudioExtractor:
         try:
             import yt_dlp
             
-            st.info("🎵 Extracting audio stream URL using yt-dlp...")
+            st.info("Extracting audio stream URL using yt-dlp...")
             
             # Configure yt-dlp options for best audio extraction
             ydl_opts = {
@@ -558,7 +568,7 @@ class YouTubeAudioExtractor:
                 info = ydl.extract_info(youtube_url, download=False)
                 
                 if not info:
-                    st.error("❌ Could not extract video information")
+                    st.error("Could not extract video information")
                     return None
                 
                 # Look for the best audio stream URL
@@ -571,7 +581,7 @@ class YouTubeAudioExtractor:
                     # Sort by audio bitrate (highest first)
                     audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                     best_audio = audio_formats[0]
-                    st.success(f"✅ Found audio-only stream: {best_audio.get('format_note', 'unknown quality')}")
+                    st.success(f"Found audio-only stream: {best_audio.get('format_note', 'unknown quality')}")
                     return best_audio.get('url')
                 
                 # Fallback: find formats with audio (including video+audio)
@@ -581,19 +591,17 @@ class YouTubeAudioExtractor:
                     # Sort by audio bitrate
                     formats_with_audio.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                     best_format = formats_with_audio[0]
-                    st.success(f"✅ Found audio stream: {best_format.get('format_note', 'unknown quality')}")
+                    st.success(f"Found audio stream: {best_format.get('format_note', 'unknown quality')}")
                     return best_format.get('url')
                 
-                st.error("❌ No audio streams found in video")
+                st.error("No audio streams found in video")
                 return None
                 
         except ImportError:
-            st.error("❌ yt-dlp not installed. Install with: pip install yt-dlp")
+            st.error("yt-dlp not installed. Install with: pip install yt-dlp")
             return None
         except Exception as e:
-            st.error(f"❌ Audio extraction error: {e}")
-            # Log more details for debugging
-            st.error(f"URL: {youtube_url}")
+            st.error(f"Audio extraction error: {e}")
             return None
 
 class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
@@ -614,36 +622,36 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
         duration = self.chunker.get_video_duration(url)
         
         if duration and duration > (self.max_duration_minutes * 60):
-            st.info(f"📄 Long video detected ({duration//60}m {duration%60}s) - using chunked transcription")
+            st.info(f"Long video detected ({duration//60}m {duration%60}s) - using chunked transcription")
             return self._transcribe_with_chunking(url, language)
         else:
-            st.info(f"🎵 Standard transcription for video ({duration//60 if duration else 'unknown'}m)")
+            st.info(f"Standard transcription for video ({duration//60 if duration else 'unknown'}m)")
             return self._transcribe_standard(url, language)
     
     def _transcribe_standard(self, url: str, language: str) -> Optional[str]:
         """Standard transcription without chunking"""
         # Step 1: Extract audio URL from YouTube video
-        st.info("🎵 Step 1: Extracting audio URL from YouTube video...")
+        st.info("Step 1: Extracting audio URL from YouTube video...")
         audio_url = self.audio_extractor.extract_audio_url(url)
         
         if not audio_url:
-            st.error("🚫 Cannot extract audio URL from YouTube video. ASR fallback failed.")
+            st.error("Cannot extract audio URL from YouTube video. ASR fallback failed.")
             return None
         
         # Step 2: Proceed with AssemblyAI transcription using the extracted audio URL
-        st.info("🎤 Step 2: Starting AssemblyAI transcription...")
+        st.info("Step 2: Starting AssemblyAI transcription...")
         return self._transcribe_audio_url(audio_url, language)
     
     def _transcribe_with_chunking(self, url: str, language: str) -> Optional[str]:
         """Transcription with chunking for long videos"""
-        st.info("✂️ Step 1: Preparing video chunks...")
+        st.info("Step 1: Preparing video chunks...")
         chunks = self.chunker.extract_chunked_audio_urls(url)
         
         if not chunks:
             st.warning("Could not create chunks, falling back to standard transcription")
             return self._transcribe_standard(url, language)
         
-        st.info("🚀 Step 2: Starting parallel chunk transcription...")
+        st.info("Step 2: Starting parallel chunk transcription...")
         return self.chunker.transcribe_chunks_parallel(chunks, self, language)
     
     def _transcribe_audio_url(self, audio_url: str, language: str) -> Optional[str]:
@@ -667,7 +675,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                 "speech_model": "best"  # Use best available model
             }
             
-            st.info("📤 Submitting transcription request to AssemblyAI...")
+            st.info("Submitting transcription request to AssemblyAI...")
             response = requests.post(
                 f"{self.base_url}/transcript",
                 json=data,
@@ -678,23 +686,23 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             if response.status_code != 200:
                 error_data = response.json()
                 error_msg = error_data.get('error', 'Unknown error')
-                st.error(f"❌ AssemblyAI submission error ({response.status_code}): {error_msg}")
+                st.error(f"AssemblyAI submission error ({response.status_code}): {error_msg}")
                 return None
                 
             transcript_id = response.json()['id']
-            st.success(f"✅ Transcription submitted with ID: {transcript_id}")
+            st.success(f"Transcription submitted with ID: {transcript_id}")
             
             # Step 3: Poll for completion with progress indication
             return self._poll_for_completion(transcript_id, headers)
             
         except requests.exceptions.Timeout:
-            st.error("🕘 Request timed out while submitting to AssemblyAI")
+            st.error("Request timed out while submitting to AssemblyAI")
             return None
         except requests.exceptions.RequestException as e:
-            st.error(f"🌐 Network error communicating with AssemblyAI: {e}")
+            st.error(f"Network error communicating with AssemblyAI: {e}")
             return None
         except Exception as e:
-            st.error(f"💥 AssemblyAI transcription error: {e}")
+            st.error(f"AssemblyAI transcription error: {e}")
             return None
     
     def _poll_for_completion(self, transcript_id: str, headers: dict) -> Optional[str]:
@@ -703,7 +711,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
         max_attempts = 120  # 6 minutes max (3 second intervals)
         attempt = 0
         
-        st.info("⏳ Polling for transcription completion...")
+        st.info("Polling for transcription completion...")
         
         # Create a progress bar and status display
         progress_bar = st.progress(0)
@@ -714,31 +722,31 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                 polling_response = requests.get(polling_endpoint, headers=headers, timeout=30)
                 
                 if polling_response.status_code != 200:
-                    st.error(f"❌ Polling error ({polling_response.status_code})")
+                    st.error(f"Polling error ({polling_response.status_code})")
                     return None
                 
                 polling_data = polling_response.json()
                 status = polling_data.get('status', 'unknown')
                 
                 # Update status display
-                status_text.text(f"📊 Status: {status} (attempt {attempt + 1}/{max_attempts})")
+                status_text.text(f"Status: {status} (attempt {attempt + 1}/{max_attempts})")
                 progress_bar.progress((attempt + 1) / max_attempts)
                 
                 if status == 'completed':
-                    status_text.text("🎉 Transcription completed successfully!")
+                    status_text.text("Transcription completed successfully!")
                     progress_bar.progress(1.0)
                     
                     transcript_text = polling_data.get('text', '')
                     if transcript_text:
-                        st.success(f"✅ Received transcript ({len(transcript_text)} characters)")
+                        st.success(f"Received transcript ({len(transcript_text)} characters)")
                         return transcript_text
                     else:
-                        st.error("❌ Transcription completed but no text returned")
+                        st.error("Transcription completed but no text returned")
                         return None
                         
                 elif status == 'error':
                     error_msg = polling_data.get('error', 'Unknown transcription error')
-                    st.error(f"❌ AssemblyAI transcription error: {error_msg}")
+                    st.error(f"AssemblyAI transcription error: {error_msg}")
                     return None
                     
                 elif status in ['queued', 'processing']:
@@ -747,18 +755,18 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                     attempt += 1
                     
                 else:
-                    st.warning(f"⚠️ Unknown status: {status}")
+                    st.warning(f"Unknown status: {status}")
                     time.sleep(3)
                     attempt += 1
             
             except requests.exceptions.Timeout:
-                st.error("🕘 Polling request timed out")
+                st.error("Polling request timed out")
                 return None
             except Exception as e:
-                st.error(f"💥 Polling error: {e}")
+                st.error(f"Polling error: {e}")
                 return None
         
-        st.error("⏰ Transcription polling timed out after 6 minutes")
+        st.error("Transcription polling timed out after 6 minutes")
         return None
 
 class LLMProvider:
@@ -794,7 +802,7 @@ class DeepSeekProvider(LLMProvider):
     
     def _process_single_chunk(self, transcript: str, system_prompt: str) -> Optional[str]:
         """Process transcript as a single chunk"""
-        st.info("🤖 Processing transcript as single chunk...")
+        st.info("Processing transcript as single chunk...")
         return self._make_api_request(transcript, system_prompt)
     
     def _process_with_chunking(self, transcript: str, system_prompt: str) -> Optional[str]:
@@ -805,7 +813,7 @@ class DeepSeekProvider(LLMProvider):
         if len(chunks) == 1:
             return self._process_single_chunk(transcript, system_prompt)
         
-        st.info(f"🧩 Processing {len(chunks)} chunks with DeepSeek for better results...")
+        st.info(f"Processing {len(chunks)} chunks with DeepSeek for better results...")
         
         # Process chunks in parallel with context-aware prompts
         processed_chunks = []
@@ -823,7 +831,7 @@ class DeepSeekProvider(LLMProvider):
             chunk_text = chunk_info['text']
             
             try:
-                status_text.text(f"🤖 Processing chunk {chunk_id + 1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
+                status_text.text(f"Processing chunk {chunk_id + 1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
                 
                 # Create context-aware prompt for this chunk
                 chunk_prompt = self.text_chunker.create_chunk_specific_prompt(
@@ -841,7 +849,7 @@ class DeepSeekProvider(LLMProvider):
                 }
                 
             except Exception as e:
-                st.error(f"❌ Chunk {chunk_id + 1} failed: {e}")
+                st.error(f"Chunk {chunk_id + 1} failed: {e}")
                 return {
                     'chunk_id': chunk_id,
                     'result': None,
@@ -867,15 +875,15 @@ class DeepSeekProvider(LLMProvider):
                     chunk_results.append(result)
                     
                     if result['success']:
-                        st.success(f"✅ Chunk {result['chunk_id'] + 1} processed")
+                        st.success(f"Chunk {result['chunk_id'] + 1} processed")
                     else:
-                        st.error(f"❌ Chunk {result['chunk_id'] + 1} failed")
+                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
                     
                     # Update progress
                     progress_bar.progress(len(chunk_results) / len(chunks))
                     
                 except Exception as e:
-                    st.error(f"💥 Chunk processing error: {e}")
+                    st.error(f"Chunk processing error: {e}")
         
         # Sort results by chunk_id
         chunk_results.sort(key=lambda x: x['chunk_id'])
@@ -891,18 +899,18 @@ class DeepSeekProvider(LLMProvider):
                 failed_chunks.append(result['chunk_id'] + 1)
         
         if not successful_results:
-            st.error("❌ All chunks failed to process")
+            st.error("All chunks failed to process")
             return None
         
         if failed_chunks:
-            st.warning(f"⚠️ Chunks {failed_chunks} failed, but combining successful chunks")
+            st.warning(f"Chunks {failed_chunks} failed, but combining successful chunks")
         
         # Combine chunks intelligently
-        status_text.text("🔗 Combining processed chunks...")
+        status_text.text("Combining processed chunks...")
         combined_result = self._combine_processed_chunks(successful_results, language)
         
         progress_bar.progress(1.0)
-        status_text.text(f"🎉 Successfully processed and combined {len(successful_results)} chunks!")
+        status_text.text(f"Successfully processed and combined {len(successful_results)} chunks!")
         
         return combined_result
     
@@ -1092,18 +1100,18 @@ class TranscriptOrchestrator:
     
     def get_transcript(self, url: str, language: str, use_fallback: bool = False) -> Optional[str]:
         # Try primary provider first
-        st.info("🔍 Trying primary transcript provider (Supadata)...")
+        st.info("Trying primary transcript provider (Supadata)...")
         transcript = self.transcript_provider.get_transcript(url, language)
         
         # If no transcript and fallback is enabled, try ASR
         if not transcript and use_fallback and self.asr_fallback_provider:
-            st.info("🎤 No official captions found. Trying ASR fallback (AssemblyAI with chunking)...")
+            st.info("No official captions found. Trying ASR fallback (AssemblyAI with chunking)...")
             transcript = self.asr_fallback_provider.get_transcript(url, language)
             
         if not transcript:
-            st.warning("❌ No transcript available from any provider")
+            st.warning("No transcript available from any provider")
         else:
-            st.success("✅ Transcript obtained successfully")
+            st.success("Transcript obtained successfully")
             
         return transcript
     
@@ -1116,11 +1124,14 @@ class TranscriptOrchestrator:
 
 def login_page():
     """Display login page"""
-    st.title("🎬 YouTube Transcript Processor")
-    st.subheader("🔐 Login Required")
+    st.title("YouTube Transcript Processor")
+    st.subheader("Login Required")
+    
+    # Show default credentials info
+    st.info("**Default Login:** Username: `admin` | Password: `admin123`")
     
     with st.form("login_form"):
-        username = st.text_input("Username")
+        username = st.text_input("Username", value="admin")
         password = st.text_input("Password", type="password")
         submit_button = st.form_submit_button("Login")
         
@@ -1141,11 +1152,35 @@ def login_page():
                 st.error("Invalid credentials")
                 return False
     
+    # Debug section for login issues
+    with st.expander("Login Debug", expanded=False):
+        st.subheader("Available Users")
+        auth_manager = AuthManager()
+        
+        for user in auth_manager.users.keys():
+            st.text(f"User: {user}")
+        
+        # Check admin password hash
+        admin_user = auth_manager.users.get("admin", {})
+        expected_hash = auth_manager._hash_password("admin123")
+        actual_hash = admin_user.get("password_hash", "")
+        
+        st.text(f"Expected hash (admin123): {expected_hash[:16]}...")
+        st.text(f"Actual hash: {actual_hash[:16]}...")
+        st.text(f"Hashes match: {expected_hash == actual_hash}")
+        
+        # Check if ADMIN_PASSWORD env var is set
+        env_admin_password = os.getenv("ADMIN_PASSWORD")
+        if env_admin_password:
+            st.text(f"ADMIN_PASSWORD env var is set to: {env_admin_password[:4]}****")
+        else:
+            st.text("ADMIN_PASSWORD env var not set - using default 'admin123'")
+    
     return False
 
 def main_app():
     """Main application interface"""
-    st.title("🎬 YouTube Transcript Processor")
+    st.title("YouTube Transcript Processor")
     
     # Logout button
     col1, col2 = st.columns([6, 1])
@@ -1156,74 +1191,112 @@ def main_app():
                     del st.session_state[key]
             st.rerun()
     
-    st.write(f"Welcome, **{st.session_state.username}**! 👋")
+    st.write(f"Welcome, **{st.session_state.username}**!")
     
     # Get API keys from session
     api_keys = st.session_state.get('api_keys', {})
     
     # Configuration Section
-    st.header("⚙️ Configuration")
+    st.header("Configuration")
     
-    with st.expander("📊 API Status", expanded=True):
+    with st.expander("API Status", expanded=True):
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             if api_keys.get('supadata'):
-                st.success("✅ Supadata")
+                st.success("Supadata")
             else:
-                st.error("❌ Supadata")
+                st.error("Supadata")
         
         with col2:
             if api_keys.get('assemblyai'):
-                st.success("✅ AssemblyAI")
+                st.success("AssemblyAI")
             else:
-                st.error("❌ AssemblyAI")
+                st.error("AssemblyAI")
         
         with col3:
             if api_keys.get('deepseek'):
-                st.success("✅ DeepSeek")
+                st.success("DeepSeek")
             else:
-                st.error("❌ DeepSeek")
+                st.error("DeepSeek")
         
         with col4:
             if api_keys.get('youtube'):
-                st.success("✅ YouTube Data")
+                st.success("YouTube Data")
             else:
-                st.error("❌ YouTube Data")
+                st.error("YouTube Data")
     
-    # Debug section to help troubleshoot API key loading
-    with st.expander("🐛 Debug Info", expanded=False):
+    # Improved debug section
+    with st.expander("Debug Info", expanded=False):
         st.subheader("Environment Variables Check")
         
-        # Check what env vars are available
-        env_vars_found = []
-        possible_keys = [
-            "ADMIN_SUPADATA_KEY", "ADMIN_ASSEMBLYAI_KEY", "ADMIN_DEEPSEEK_KEY", "ADMIN_YOUTUBE_KEY",
-            "SUPADATA_API_KEY", "ASSEMBLYAI_API_KEY", "DEEPSEEK_API_KEY", "YOUTUBE_API_KEY",
-            "ASSEMBLYAI_KEY", "DEEPSEEK_KEY"
+        # Check only the env vars that your app actually uses
+        user_prefix = st.session_state.username.upper()
+        expected_keys = [
+            f"{user_prefix}_SUPADATA_KEY",
+            f"{user_prefix}_ASSEMBLYAI_KEY", 
+            f"{user_prefix}_DEEPSEEK_KEY",
+            f"{user_prefix}_YOUTUBE_KEY"
         ]
         
-        for key in possible_keys:
+        for key in expected_keys:
             value = os.getenv(key)
             if value:
-                masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:] if len(value) > 8 else "****"
-                env_vars_found.append(f"✅ {key}: {masked_value}")
+                masked_value = value[:4] + "*" * max(0, len(value) - 8) + value[-4:] if len(value) > 8 else "****"
+                st.success(f"{key}: {masked_value}")
             else:
-                env_vars_found.append(f"❌ {key}: Not found")
-        
-        for var_info in env_vars_found:
-            st.text(var_info)
+                st.error(f"{key}: Not found")
         
         st.subheader("Loaded API Keys for Current User")
         for key, value in api_keys.items():
             if value:
-                masked_value = value[:4] + "*" * (len(value) - 8) + value[-4:] if len(value) > 8 else "****" 
-                st.text(f"✅ {key}: {masked_value}")
+                masked_value = value[:4] + "*" * max(0, len(value) - 8) + value[-4:] if len(value) > 8 else "****" 
+                st.success(f"{key}: {masked_value}")
             else:
-                st.text(f"❌ {key}: Not loaded")
+                st.error(f"{key}: Not loaded")
+        
+        # Additional debugging info
+        st.subheader("Authentication Status")
+        st.info(f"Current user: {st.session_state.username}")
+        st.info(f"Keys loaded: {len([k for k, v in api_keys.items() if v])}/4")
+        
+        # Test provider availability
+        st.subheader("Provider Availability")
+        
+        # Test Supadata
+        if api_keys.get('supadata'):
+            supadata_provider = SupadataTranscriptProvider(api_keys['supadata'])
+            if supadata_provider.available:
+                st.success("Supadata: Ready")
+            else:
+                st.warning("Supadata: API key set but client not available (missing supadata package?)")
+        else:
+            st.error("Supadata: No API key")
+        
+        # Test AssemblyAI
+        if api_keys.get('assemblyai'):
+            st.success("AssemblyAI: Ready")
+        else:
+            st.error("AssemblyAI: No API key")
+        
+        # Test DeepSeek
+        if api_keys.get('deepseek'):
+            st.success("DeepSeek: Ready")
+        else:
+            st.error("DeepSeek: No API key")
+        
+        # Test YouTube Data API
+        if api_keys.get('youtube'):
+            youtube_provider = YouTubeDataProvider(api_keys['youtube'])
+            if youtube_provider.available:
+                st.success("YouTube Data API: Ready")
+            else:
+                st.error("YouTube Data API: Not available")
+        else:
+            st.error("YouTube Data API: No API key")
     
     # Settings
-    with st.expander("🔧 Processing Settings"):
+    with st.expander("Processing Settings"):
         col1, col2 = st.columns(2)
         
         with col1:
@@ -1257,7 +1330,7 @@ def main_app():
             )
     
     # Main Processing Section
-    st.header("🎯 Process Video")
+    st.header("Process Video")
     
     # Input methods
     input_method = st.radio(
@@ -1307,7 +1380,7 @@ def main_app():
         videos_to_process = st.session_state.playlist_videos
     
     if videos_to_process:
-        st.subheader(f"📋 Videos to Process ({len(videos_to_process)})")
+        st.subheader(f"Videos to Process ({len(videos_to_process)})")
         
         # Show video selection for playlists/batch
         if len(videos_to_process) > 1:
@@ -1327,7 +1400,7 @@ def main_app():
                 videos_to_process = selected_videos
         
         # Custom system prompt
-        st.subheader("📝 System Prompt")
+        st.subheader("System Prompt")
         
         default_prompts = {
             "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
@@ -1375,13 +1448,13 @@ Format the output as a clean, professional document that would be easy to read a
         )
         
         # Processing button
-        if st.button("🚀 Start Processing", type="primary"):
+        if st.button("Start Processing", type="primary"):
             if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
-                st.error("❌ No transcript providers available. Please configure API keys.")
+                st.error("No transcript providers available. Please configure API keys.")
                 return
             
             if not api_keys.get('deepseek'):
-                st.error("❌ DeepSeek API key required for structuring. Please configure API keys.")
+                st.error("DeepSeek API key required for structuring. Please configure API keys.")
                 return
             
             process_videos(videos_to_process, language, use_asr_fallback, system_prompt, 
@@ -1408,43 +1481,43 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
     
     # Process each video
     for i, video in enumerate(videos):
-        st.subheader(f"📹 Processing Video {i+1}/{len(videos)}")
+        st.subheader(f"Processing Video {i+1}/{len(videos)}")
         st.write(f"**Title:** {video['title']}")
         st.write(f"**URL:** {video['url']}")
         
         try:
             # Step 1: Get transcript
-            with st.spinner("🔍 Getting transcript..."):
+            with st.spinner("Getting transcript..."):
                 transcript = orchestrator.get_transcript(video['url'], language, use_asr_fallback)
             
             if not transcript:
-                st.error("❌ Failed to get transcript")
+                st.error("Failed to get transcript")
                 continue
             
             # Show transcript preview
-            with st.expander("📄 Raw Transcript Preview"):
+            with st.expander("Raw Transcript Preview"):
                 st.text_area("Transcript", transcript[:1000] + "..." if len(transcript) > 1000 else transcript, height=200)
             
             # Step 2: Structure transcript
-            with st.spinner("🤖 Structuring transcript with LLM..."):
+            with st.spinner("Structuring transcript with LLM..."):
                 structured = orchestrator.structure_transcript(transcript, system_prompt)
             
             if not structured:
-                st.error("❌ Failed to structure transcript")
+                st.error("Failed to structure transcript")
                 continue
             
             # Display results
-            st.success("✅ Processing completed!")
+            st.success("Processing completed!")
             
             # Show structured result
-            with st.expander("📋 Structured Transcript", expanded=True):
+            with st.expander("Structured Transcript", expanded=True):
                 st.markdown(structured)
             
             # Download options
             col1, col2 = st.columns(2)
             with col1:
                 st.download_button(
-                    "💾 Download Raw Transcript",
+                    "Download Raw Transcript",
                     transcript,
                     file_name=f"raw_transcript_{i+1}.txt",
                     mime="text/plain"
@@ -1452,7 +1525,7 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             
             with col2:
                 st.download_button(
-                    "📄 Download Structured Transcript",
+                    "Download Structured Transcript",
                     structured,
                     file_name=f"structured_transcript_{i+1}.md",
                     mime="text/markdown"
@@ -1461,7 +1534,7 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             st.divider()
             
         except Exception as e:
-            st.error(f"💥 Error processing video: {str(e)}")
+            st.error(f"Error processing video: {str(e)}")
             continue
 
 # ==================== MAIN ENTRY POINT ====================
