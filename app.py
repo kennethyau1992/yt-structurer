@@ -1,10 +1,3 @@
-diff --git a/app.py b/app.py
-index d4592febfdefff26f4d291db45a83f887a04e6c3..d0630f3e96107123bf15509cfb85dffd82a260f0 100644
---- a/app.py
-+++ b/app.py
-@@ -1,42 +1,45 @@
- #!/usr/bin/env python3
- # -*- coding: utf-8 -*-
  """
  YouTube Transcript Processor with Executive Summary and Persistent Data
  Complete application with all improvements implemented
