@@ -1,4 +1,11 @@
-elif status == 'error':
+if transcript_text:
+                        st.success(f"Received transcript ({len(transcript_text)} characters)")
+                        return transcript_text
+                    else:
+                        st.error("Transcription completed but no text returned")
+                        return None
+                        
+                elif status == 'error':
                     error_msg = polling_data.get('error', 'Unknown transcription error')
                     st.error(f"AssemblyAI transcription error: {error_msg}")
                     return None
@@ -88,12 +95,11 @@ Format using markdown. Be concise and focus on value."""
 
 使用markdown格式。保持简洁并专注于价值。"""
             
-            # Use faster settings for summary
             return self._make_api_request(
-                transcript[:12000],  # Use first 12k chars for summary
+                transcript[:12000],
                 summary_prompt,
-                temperature=0.3,  # Higher temp for creativity
-                model="deepseek-chat"  # Always use faster model for summary
+                temperature=0.3,
+                model="deepseek-chat"
             )
             
         except Exception as e:
@@ -491,13 +497,13 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
                     summary = orchestrator.generate_summary(transcript, language)
                 
                 if summary:
-                    st.success("✅ Executive Summary Ready!")
+                    st.success("Executive Summary Ready!")
                     
-                    with st.expander("📊 Executive Summary", expanded=True):
+                    with st.expander("Executive Summary", expanded=True):
                         st.markdown(summary)
                         
                         st.download_button(
-                            "📥 Download Summary",
+                            "Download Summary",
                             summary,
                             file_name=f"summary_{video['title'][:30]}.md",
                             mime="text/markdown",
@@ -509,7 +515,7 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
             # Step 3: Process detailed transcript
             structured = None
             with detailed_container:
-                st.info("📝 Processing detailed transcript (this may take a moment)...")
+                st.info("Processing detailed transcript (this may take a moment)...")
                 
                 progress_text = st.empty()
                 progress_text.text("Structuring transcript with AI...")
@@ -520,9 +526,9 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
                 progress_text.empty()
                 
                 if structured:
-                    st.success("✅ Detailed Transcript Ready!")
+                    st.success("Detailed Transcript Ready!")
                     
-                    with st.expander("📄 Detailed Structured Transcript"):
+                    with st.expander("Detailed Structured Transcript"):
                         st.markdown(structured[:2000] + "..." if len(structured) > 2000 else structured)
                         
                         if len(structured) > 2000:
@@ -532,7 +538,7 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
                     col1, col2 = st.columns(2)
                     with col1:
                         st.download_button(
-                            "📥 Download Raw Transcript",
+                            "Download Raw Transcript",
                             transcript,
                             file_name=f"raw_{video['title'][:30]}.txt",
                             mime="text/plain",
@@ -540,7 +546,7 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
                         )
                     with col2:
                         st.download_button(
-                            "📥 Download Structured Transcript",
+                            "Download Structured Transcript",
                             structured,
                             file_name=f"structured_{video['title'][:30]}.md",
                             mime="text/markdown",
@@ -566,7 +572,7 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
             st.error(f"Error processing video: {str(e)}")
             continue
     
-    st.success("🎉 All videos processed successfully!")
+    st.success("All videos processed successfully!")
 
 def main_app():
     """Main application interface"""
@@ -597,7 +603,7 @@ def main_app():
     saved_settings = user_data.get_settings()
     
     # Tabs for main interface
-    tab1, tab2, tab3 = st.tabs(["📝 Process Video", "📚 History", "⚙️ Settings"])
+    tab1, tab2, tab3 = st.tabs(["Process Video", "History", "Settings"])
     
     with tab1:
         st.header("Process Video")
@@ -606,7 +612,7 @@ def main_app():
         col1, col2 = st.columns([3, 1])
         with col2:
             quick_mode = st.checkbox(
-                "⚡ Quick Mode",
+                "Quick Mode",
                 value=True,
                 help="Use faster model (deepseek-chat) for quicker results"
             )
@@ -662,7 +668,7 @@ def main_app():
             st.subheader(f"Videos to Process ({len(videos_to_process)})")
             
             # Process button
-            if st.button("🚀 Start Processing", type="primary"):
+            if st.button("Start Processing", type="primary"):
                 language = saved_settings.get('language', 'English')
                 use_asr_fallback = saved_settings.get('use_asr_fallback', True)
                 deepseek_model = "deepseek-chat" if quick_mode else saved_settings.get('deepseek_model', 'deepseek-chat')
@@ -685,7 +691,7 @@ def main_app():
                 )
     
     with tab2:
-        st.header("📚 Processing History")
+        st.header("Processing History")
         
         history = user_data.get_history()
         if history:
@@ -701,7 +707,7 @@ def main_app():
                     with col1:
                         if entry.get('transcript'):
                             st.download_button(
-                                "📄 Raw Transcript",
+                                "Raw Transcript",
                                 entry['transcript'],
                                 file_name=f"transcript_{entry['title'][:30]}.txt",
                                 mime="text/plain"
@@ -709,7 +715,7 @@ def main_app():
                     with col2:
                         if entry.get('summary'):
                             st.download_button(
-                                "📋 Summary",
+                                "Summary",
                                 entry['summary'],
                                 file_name=f"summary_{entry['title'][:30]}.md",
                                 mime="text/markdown"
@@ -717,7 +723,7 @@ def main_app():
                     with col3:
                         if entry.get('structured'):
                             st.download_button(
-                                "📝 Structured",
+                                "Structured",
                                 entry['structured'],
                                 file_name=f"structured_{entry['title'][:30]}.md",
                                 mime="text/markdown"
@@ -726,7 +732,7 @@ def main_app():
             st.info("No processing history yet")
     
     with tab3:
-        st.header("⚙️ Settings")
+        st.header("Settings")
         
         with st.form("settings_form"):
             st.subheader("Processing Settings")
@@ -786,7 +792,7 @@ def main_app():
             else:
                 system_prompt = None
             
-            if st.form_submit_button("💾 Save Settings"):
+            if st.form_submit_button("Save Settings"):
                 new_settings = {
                     'language': language,
                     'use_asr_fallback': use_asr_fallback,
@@ -794,7 +800,76 @@ def main_app():
                     'temperature': temperature,
                     'browser_for_cookies': browser_for_cookies,
                     'system_prompt': system_prompt if use_custom_prompt else None
-                import os
+                }
+                user_data.update_settings(new_settings)
+                st.success("Settings saved!")
+        
+        # API Status
+        st.subheader("API Status")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if api_keys.get('supadata'):
+                st.success("✅ Supadata")
+            else:
+                st.error("❌ Supadata")
+        
+        with col2:
+            if api_keys.get('assemblyai'):
+                st.success("✅ AssemblyAI")
+            else:
+                st.error("❌ AssemblyAI")
+        
+        with col3:
+            if api_keys.get('deepseek'):
+                st.success("✅ DeepSeek")
+            else:
+                st.error("❌ DeepSeek")
+        
+        with col4:
+            if api_keys.get('youtube'):
+                st.success("✅ YouTube")
+            else:
+                st.error("❌ YouTube")
+        
+        # Cookie Status
+        with st.expander("YouTube Authentication"):
+            render_cookies = '/etc/secrets/youtube_cookies.txt'
+            if os.path.exists(render_cookies):
+                st.success(f"✅ Render cookies found")
+            else:
+                st.warning("⚠️ No Render cookies file")
+                st.info("Add youtube_cookies.txt to Render secrets")
+
+# ==================== MAIN ENTRY POINT ====================
+
+def main():
+    """Main entry point"""
+    st.set_page_config(
+        page_title="YouTube Transcript Processor",
+        page_icon="🎬",
+        layout="wide"
+    )
+    
+    # Initialize session state
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    
+    # Show appropriate page
+    if not st.session_state.authenticated:
+        login_page()
+    else:
+        main_app()
+
+if __name__ == "__main__":
+    main()#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+YouTube Transcript Processor with Executive Summary and Persistent Data
+Complete application with all improvements implemented
+"""
+
+import os
 import re
 import json
 import time
@@ -836,12 +911,12 @@ class UserDataManager:
             'settings': {
                 'language': 'English',
                 'use_asr_fallback': True,
-                'deepseek_model': 'deepseek-chat',  # Default to faster model
+                'deepseek_model': 'deepseek-chat',
                 'temperature': 0.1,
                 'browser_for_cookies': 'none',
                 'system_prompt': None
             },
-            'history': [],  # List of {url, title, timestamp, transcript, summary, structured}
+            'history': [],
             'api_keys': {}
         }
     
@@ -864,7 +939,6 @@ class UserDataManager:
     
     def add_to_history(self, entry: dict):
         """Add entry to history"""
-        # Keep only last 50 entries
         self.data['history'].insert(0, entry)
         self.data['history'] = self.data['history'][:50]
         self.save_data()
@@ -1557,12 +1631,4 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                     
                     transcript_text = polling_data.get('text', '')
                     if transcript_text:
-                        st.success(f"Received transcript ({len(transcript_text)} characters)")
-                        return transcript_text
-                    else:
-                        st.error("Transcription completed but no text returned")
-                        return None
-                        
-                elif status == 'error':
-                    error_msg = polling_data.get('error', 'Unknown transcription error')
-                    st.error(f"
+                        st.success
