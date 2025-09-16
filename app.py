@@ -1,7 +1,11 @@
- """
- YouTube Transcript Processor with Executive Summary and Persistent Data
- Complete application with all improvements implemented
- """
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+-"""
+-YouTube Transcript Processor with Executive Summary and Persistent Data
+-Complete application with all improvements implemented
+-"""
++# YouTube Transcript Processor with Executive Summary and Persistent Data
++# Complete application with all improvements implemented
  
  import os
  import re
@@ -46,10 +50,10 @@
          else:
              self.data = self.get_default_data()
 diff --git a/app.py b/app.py
-index d4592febfdefff26f4d291db45a83f887a04e6c3..d0630f3e96107123bf15509cfb85dffd82a260f0 100644
+index d4592febfdefff26f4d291db45a83f887a04e6c3..642e21420a2f161eef1b1d3203a2172d9d69c350 100644
 --- a/app.py
 +++ b/app.py
-@@ -251,131 +254,140 @@ class AudioChunker:
+@@ -251,131 +252,140 @@ class AudioChunker:
                      info = ydl.extract_info(youtube_url, download=False)
                      formats = info.get('formats', [])
                      
@@ -250,10 +254,10 @@ index d4592febfdefff26f4d291db45a83f887a04e6c3..d0630f3e96107123bf15509cfb85dffd
          """Find intelligent split points in text"""
          split_points = []
 diff --git a/app.py b/app.py
-index d4592febfdefff26f4d291db45a83f887a04e6c3..d0630f3e96107123bf15509cfb85dffd82a260f0 100644
+index d4592febfdefff26f4d291db45a83f887a04e6c3..642e21420a2f161eef1b1d3203a2172d9d69c350 100644
 --- a/app.py
 +++ b/app.py
-@@ -728,43 +740,806 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
+@@ -728,43 +738,806 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                  return None
                  
              transcript_id = response.json()['id']
@@ -1066,3 +1070,6 @@ index d4592febfdefff26f4d291db45a83f887a04e6c3..d0630f3e96107123bf15509cfb85dffd
 +
 +if __name__ == "__main__":
 +    main()
+ 
+EOF
+)
