@@ -41,14 +41,20 @@ class UserDataManager:
         else:
             self.data = self.get_default_data()
     
-    def get_default_data(self):
-        """Get default user data structure"""
-        return {
-            'settings': {
-                'language': 'English',
-                'use_asr_fallback': True,
-                'deepseek_model': 'deepseek-chat',
-                'temperature': 0.1,
+def get_default_data(self):
+    """Get default user data structure"""
+    return {
+        'settings': {
+            'language': 'English',
+            'use_asr_fallback': True,
+            'deepseek_model': 'deepseek-chat',
+            'temperature': 0.1,
+            'browser_for_cookies': 'none',
+            'system_prompt': None
+        },
+        'history': [],
+        'api_keys': {}
+    }
 
 if transcript_text:
                         st.success(f"Received transcript ({len(transcript_text)} characters)")
