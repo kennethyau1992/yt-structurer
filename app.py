@@ -1,3 +1,55 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+YouTube Transcript Processor with Executive Summary and Persistent Data
+Complete application with all improvements implemented
+"""
+
+import os
+import re
+import json
+import time
+import hashlib
+import pickle
+import concurrent.futures
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, List, Dict, Tuple, Any
+import requests
+import streamlit as st
+
+# ==================== PERSISTENCE LAYER ====================
+
+class UserDataManager:
+    """Manages user settings and history persistence"""
+    
+    def __init__(self, username: str):
+        self.username = username
+        self.data_dir = Path("user_data")
+        self.data_dir.mkdir(exist_ok=True)
+        self.user_file = self.data_dir / f"{username}_data.pkl"
+        self.load_data()
+    
+    def load_data(self):
+        """Load user data from file"""
+        if self.user_file.exists():
+            try:
+                with open(self.user_file, 'rb') as f:
+                    self.data = pickle.load(f)
+            except:
+                self.data = self.get_default_data()
+        else:
+            self.data = self.get_default_data()
+    
+    def get_default_data(self):
+        """Get default user data structure"""
+        return {
+            'settings': {
+                'language': 'English',
+                'use_asr_fallback': True,
+                'deepseek_model': 'deepseek-chat',
+                'temperature': 0.1,
+
 if transcript_text:
                         st.success(f"Received transcript ({len(transcript_text)} characters)")
                         return transcript_text
