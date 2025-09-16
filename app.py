@@ -1,87 +1,13 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-YouTube Transcript Processor with Executive Summary and Persistent Data
-Complete application with all improvements implemented
-"""
-
 import os
 import re
 import json
 import time
 import hashlib
-import pickle
 import concurrent.futures
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, List, Dict, Tuple, Any
 import requests
 import streamlit as st
-
-# ==================== PERSISTENCE LAYER ====================
-
-class UserDataManager:
-    """Manages user settings and history persistence"""
-    
-    def __init__(self, username: str):
-        self.username = username
-        self.data_dir = Path("user_data")
-        self.data_dir.mkdir(exist_ok=True)
-        self.user_file = self.data_dir / f"{username}_data.pkl"
-        self.load_data()
-    
-    def load_data(self):
-        """Load user data from file"""
-        if self.user_file.exists():
-            try:
-                with open(self.user_file, 'rb') as f:
-                    self.data = pickle.load(f)
-            except:
-                self.data = self.get_default_data()
-        else:
-            self.data = self.get_default_data()
-    
-    def get_default_data(self):
-        """Get default user data structure"""
-        return {
-            'settings': {
-                'language': 'English',
-                'use_asr_fallback': True,
-                'deepseek_model': 'deepseek-chat',
-                'temperature': 0.1,
-                'browser_for_cookies': 'none',
-                'system_prompt': None
-            },
-            'history': [],
-            'api_keys': {}
-        }
-    
-    def save_data(self):
-        """Save user data to file"""
-        try:
-            with open(self.user_file, 'wb') as f:
-                pickle.dump(self.data, f)
-        except Exception as e:
-            st.warning(f"Could not save user data: {e}")
-    
-    def get_settings(self):
-        """Get user settings"""
-        return self.data.get('settings', {})
-    
-    def update_settings(self, settings: dict):
-        """Update user settings"""
-        self.data['settings'].update(settings)
-        self.save_data()
-    
-    def add_to_history(self, entry: dict):
-        """Add entry to history"""
-        self.data['history'].insert(0, entry)
-        self.data['history'] = self.data['history'][:50]
-        self.save_data()
-    
-    def get_history(self):
-        """Get user history"""
-        return self.data.get('history', [])
 
 # ==================== AUTHENTICATION LAYER ====================
 
@@ -89,9 +15,11 @@ class AuthManager:
     """Simple authentication manager for storing user credentials"""
     
     def __init__(self):
+        # In production, use environment variables or a secure database
         self.users = {
+            # Default admin user - change these credentials!
             "admin": {
-                "password_hash": self._hash_password("admin123"),
+                "password_hash": self._hash_password("admin123"),  # Change this!
                 "api_keys": {
                     "supadata": os.getenv("ADMIN_SUPADATA_KEY", ""),
                     "assemblyai": os.getenv("ADMIN_ASSEMBLYAI_KEY", ""),
@@ -100,51 +28,56 @@ class AuthManager:
                 }
             }
         }
+        
+        # Load additional users from environment variables if available
         self._load_users_from_env()
     
     def _hash_password(self, password: str) -> str:
-        """Simple password hashing"""
+        """Simple password hashing - in production use proper hashing like bcrypt"""
         return hashlib.sha256(password.encode()).hexdigest()
     
     def _load_users_from_env(self):
-        """Load users from environment variables"""
+        """Load users from environment variables with debug output"""
         env_users = {}
         
         for key, value in os.environ.items():
             if key.endswith('_PASSWORD'):
-                username = key[:-9].lower()
+                username = key[:-9].lower()  # Remove '_PASSWORD' and lowercase
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["password_hash"] = self._hash_password(value)
                 
             elif key.endswith('_SUPADATA_KEY'):
-                username = key[:-13].lower()
+                username = key[:-13].lower()  # Remove '_SUPADATA_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["supadata"] = value
                 
             elif key.endswith('_ASSEMBLYAI_KEY'):
-                username = key[:-14].lower()
+                username = key[:-14].lower()  # Remove '_ASSEMBLYAI_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["assemblyai"] = value
                 
             elif key.endswith('_DEEPSEEK_KEY'):
-                username = key[:-12].lower()
+                username = key[:-12].lower()  # Remove '_DEEPSEEK_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["deepseek"] = value
                 
             elif key.endswith('_YOUTUBE_KEY'):
-                username = key[:-12].lower()
+                username = key[:-12].lower()  # Remove '_YOUTUBE_KEY'
                 if username not in env_users:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["youtube"] = value
         
+        # Merge with existing users
         for username, user_data in env_users.items():
             if username in self.users:
+                # User already exists, update API keys
                 self.users[username]["api_keys"].update(user_data["api_keys"])
             else:
+                # New user
                 self.users[username] = user_data
     
     def authenticate(self, username: str, password: str) -> bool:
@@ -158,6 +91,13 @@ class AuthManager:
         if username in self.users:
             return self.users[username]["api_keys"]
         return {}
+    
+    def add_user(self, username: str, password: str, api_keys: Dict[str, str] = None):
+        """Add a new user (for admin functionality)"""
+        self.users[username] = {
+            "password_hash": self._hash_password(password),
+            "api_keys": api_keys or {"supadata": "", "assemblyai": "", "deepseek": "", "youtube": ""}
+        }
 
 # ==================== YOUTUBE COOKIE MANAGER ====================
 
@@ -166,7 +106,16 @@ class YouTubeCookieManager:
     
     @staticmethod
     def get_ydl_opts(use_cookies: bool = True, browser: str = 'chrome') -> dict:
-        """Get yt-dlp options with cookie configuration"""
+        """
+        Get yt-dlp options with cookie configuration
+        
+        Args:
+            use_cookies: Whether to use browser cookies
+            browser: Which browser to extract cookies from
+        
+        Returns:
+            Dictionary of yt-dlp options
+        """
         base_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -174,18 +123,27 @@ class YouTubeCookieManager:
         }
         
         if use_cookies:
+            # Check for Render secret file first
             render_cookies = '/etc/secrets/youtube_cookies.txt'
             if os.path.exists(render_cookies):
+                st.info(f"Using Render secret cookies file: {render_cookies}")
                 base_opts['cookiefile'] = render_cookies
             else:
+                # Check for environment variable
                 cookies_file = os.getenv('YOUTUBE_COOKIES_FILE')
                 if cookies_file and os.path.exists(cookies_file):
+                    st.info(f"Using cookies file from env: {cookies_file}")
                     base_opts['cookiefile'] = cookies_file
                 else:
+                    # Try browser cookies (may not work on Linux/containers)
                     import platform
-                    if platform.system() != 'Linux' and browser != 'none':
+                    if platform.system() != 'Linux':
                         base_opts['cookiesfrombrowser'] = (browser,)
+                    else:
+                        # On Linux, especially in containers, browser cookie extraction often fails
+                        st.warning("No cookies file found. Trying without authentication...")
         
+        # Add user agent to avoid some bot detection
         base_opts['headers'] = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
@@ -199,7 +157,7 @@ class AudioChunker:
     
     def __init__(self, chunk_duration_minutes: int = 12):
         self.chunk_duration_seconds = chunk_duration_minutes * 60
-        self.max_parallel_chunks = 3
+        self.max_parallel_chunks = 3  # Limit parallel processing to avoid rate limits
         self.cookie_manager = YouTubeCookieManager()
     
     def get_video_duration(self, youtube_url: str, browser: str = 'chrome') -> Optional[int]:
@@ -223,6 +181,7 @@ class AudioChunker:
         try:
             import yt_dlp
             
+            # First, get video duration
             duration = self.get_video_duration(youtube_url, browser)
             if not duration:
                 st.error("Could not determine video duration for chunking")
@@ -234,6 +193,7 @@ class AudioChunker:
             
             st.info(f"Video is {duration//60}m {duration%60}s - will chunk into {self.chunk_duration_seconds//60}-minute segments")
             
+            # Calculate number of chunks needed
             num_chunks = (duration + self.chunk_duration_seconds - 1) // self.chunk_duration_seconds
             
             chunks = []
@@ -241,6 +201,7 @@ class AudioChunker:
                 start_time = i * self.chunk_duration_seconds
                 end_time = min((i + 1) * self.chunk_duration_seconds, duration)
                 
+                # Use yt-dlp to get audio URL
                 ydl_opts = self.cookie_manager.get_ydl_opts(use_cookies=True, browser=browser)
                 ydl_opts.update({
                     'format': 'bestaudio/best',
@@ -251,6 +212,7 @@ class AudioChunker:
                     info = ydl.extract_info(youtube_url, download=False)
                     formats = info.get('formats', [])
                     
+                    # Find best audio format
                     audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
                     if not audio_formats:
                         audio_formats = [f for f in formats if f.get('acodec') != 'none']
@@ -280,6 +242,7 @@ class AudioChunker:
         st.info(f"Processing {len(chunks)} chunks in parallel...")
         
         def transcribe_single_chunk(chunk_info):
+            """Transcribe a single chunk"""
             chunk_id = chunk_info['chunk_id']
             start_time = chunk_info['start_time']
             end_time = chunk_info['end_time']
@@ -288,6 +251,7 @@ class AudioChunker:
             try:
                 st.info(f"Chunk {chunk_id + 1}: {start_time//60}m{start_time%60}s - {end_time//60}m{end_time%60}s")
                 
+                # For now, we'll transcribe the full audio URL and note the time range
                 transcript = assemblyai_provider._transcribe_audio_url(audio_url, language)
                 
                 return {
@@ -309,13 +273,16 @@ class AudioChunker:
                     'error': str(e)
                 }
         
+        # Process chunks in parallel with limited concurrency
         results = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel_chunks) as executor:
+            # Submit all chunks
             future_to_chunk = {
                 executor.submit(transcribe_single_chunk, chunk): chunk 
                 for chunk in chunks
             }
             
+            # Collect results as they complete
             for future in concurrent.futures.as_completed(future_to_chunk):
                 chunk = future_to_chunk[future]
                 try:
@@ -330,6 +297,7 @@ class AudioChunker:
                 except Exception as e:
                     st.error(f"Chunk processing error: {e}")
         
+        # Sort results by chunk_id and combine transcripts
         results.sort(key=lambda x: x['chunk_id'])
         
         successful_transcripts = []
@@ -337,6 +305,7 @@ class AudioChunker:
         
         for result in results:
             if result['success'] and result['transcript']:
+                # Add timestamp marker
                 start_min, start_sec = divmod(result['start_time'], 60)
                 end_min, end_sec = divmod(result['end_time'], 60)
                 timestamp = f"[{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}]"
@@ -352,6 +321,7 @@ class AudioChunker:
         if failed_chunks:
             st.warning(f"Chunks {failed_chunks} failed, but continuing with successful chunks")
         
+        # Combine all successful transcripts
         combined_transcript = "\n\n".join(successful_transcripts)
         
         st.success(f"Successfully combined {len(successful_transcripts)} chunks into final transcript")
@@ -360,36 +330,48 @@ class AudioChunker:
 # ==================== LLM TEXT CHUNKER ====================
 
 class LLMTextChunker:
-    """Handles chunking of long transcripts for LLM processing"""
+    """Handles chunking of long transcripts for LLM processing with intelligent text splitting"""
     
     def __init__(self, max_chunk_length: int = 8000, overlap_length: int = 200):
+        """
+        Initialize text chunker for LLM processing
+        
+        Args:
+            max_chunk_length: Maximum characters per chunk (conservative for token limits)
+            overlap_length: Number of characters to overlap between chunks for context preservation
+        """
         self.max_chunk_length = max_chunk_length
         self.overlap_length = overlap_length
-        self.min_chunk_length = 1000
+        self.min_chunk_length = 1000  # Minimum viable chunk size
         
     def estimate_tokens(self, text: str) -> int:
-        """Rough token estimation"""
+        """Rough token estimation (4 chars ≈ 1 token for most languages)"""
         return len(text) // 4
     
     def should_chunk_text(self, text: str) -> bool:
-        """Determine if text needs chunking"""
+        """Determine if text needs chunking based on length"""
         estimated_tokens = self.estimate_tokens(text)
-        return estimated_tokens > 6000
+        # Conservative threshold to avoid context window issues
+        return estimated_tokens > 6000  # ~24k characters
     
     def find_split_points(self, text: str) -> List[int]:
-        """Find intelligent split points in text"""
+        """Find intelligent split points in text (paragraphs, sections, sentences)"""
         split_points = []
         
+        # Priority 1: Look for section breaks (double newlines)
         for match in re.finditer(r'\n\s*\n', text):
             split_points.append(match.end())
         
+        # Priority 2: Look for sentence endings
         sentence_endings = r'[.!?]\s+'
         for match in re.finditer(sentence_endings, text):
             split_points.append(match.end())
         
+        # Priority 3: Look for any newlines
         for match in re.finditer(r'\n', text):
             split_points.append(match.end())
         
+        # Remove duplicates and sort
         split_points = sorted(list(set(split_points)))
         
         return split_points
@@ -415,9 +397,11 @@ class LLMTextChunker:
         chunk_id = 0
         
         while current_start < len(text):
+            # Find the end position for this chunk
             target_end = current_start + self.max_chunk_length
             
             if target_end >= len(text):
+                # Last chunk
                 chunk_text = text[current_start:]
                 chunks.append({
                     'chunk_id': chunk_id,
@@ -429,12 +413,14 @@ class LLMTextChunker:
                 })
                 break
             
+            # Find the best split point before target_end
             best_split = target_end
             for split_point in reversed(split_points):
                 if current_start + self.min_chunk_length <= split_point <= target_end:
                     best_split = split_point
                     break
             
+            # Create chunk
             chunk_text = text[current_start:best_split]
             chunks.append({
                 'chunk_id': chunk_id,
@@ -445,12 +431,58 @@ class LLMTextChunker:
                 'is_final_chunk': False
             })
             
+            # Calculate next start with overlap
             next_start = max(current_start + self.min_chunk_length, best_split - self.overlap_length)
             current_start = next_start
             chunk_id += 1
         
         st.info(f"Created {len(chunks)} intelligent chunks with overlap for context preservation")
         return chunks
+    
+    def create_chunk_specific_prompt(self, base_system_prompt: str, chunk_info: Dict, total_chunks: int, language: str) -> str:
+        """Create a context-aware system prompt for each chunk"""
+        chunk_id = chunk_info['chunk_id']
+        is_single = chunk_info.get('is_single_chunk', False)
+        is_final = chunk_info.get('is_final_chunk', False)
+        
+        if is_single:
+            return base_system_prompt
+        
+        # Multi-chunk processing instructions
+        if "English" in base_system_prompt or language == "English":
+            chunk_context = f"""
+CHUNK PROCESSING CONTEXT:
+- This is chunk {chunk_id + 1} of {total_chunks} chunks
+- Process ONLY the content in this chunk
+- Maintain consistency with overall document structure
+- {"This is the FINAL chunk - ensure proper conclusion" if is_final else "More chunks will follow - maintain section flow"}
+
+IMPORTANT CHUNK RULES:
+- Create sections/headings based ONLY on content in THIS chunk
+- If chunk starts mid-sentence/mid-topic, begin appropriately
+- If chunk ends mid-topic, end appropriately (will continue in next chunk)
+- Use section numbers that make sense for THIS chunk's content
+- Don't reference "previous" or "next" chunks in the output
+
+"""
+        else:  # Chinese
+            chunk_context = f"""
+分块处理上下文：
+- 这是第 {chunk_id + 1} 块，共 {total_chunks} 块
+- 仅处理此块中的内容
+- 保持与整体文档结构的一致性
+- {"这是最后一块 - 确保适当的结论" if is_final else "后续还有更多块 - 保持章节流畅"}
+
+重要分块规则：
+- 仅基于此块中的内容创建章节/标题
+- 如果块从句子/主题中间开始，请适当开始
+- 如果块在主题中间结束，请适当结束（将在下一块中继续）
+- 使用适合此块内容的章节编号
+- 不要在输出中引用"前一个"或"下一个"块
+
+"""
+        
+        return chunk_context + base_system_prompt
 
 # ==================== PROVIDER LAYER ====================
 
@@ -474,6 +506,7 @@ class SupadataTranscriptProvider(TranscriptProvider):
             st.warning("Supadata client not available")
             return None
         
+        # FIX: Map display language names to Supadata language codes
         language_map = {
             "English": "en",
             "中文": "zh",
@@ -491,21 +524,28 @@ class SupadataTranscriptProvider(TranscriptProvider):
             return None
     
     def _normalize_transcript(self, resp) -> str:
-        """Convert various Supadata transcript response shapes to plain text"""
+        """
+        Convert various Supadata transcript response shapes to a single plain-text string.
+        """
         if resp is None:
             return ""
         
+        # Check if it's a BatchJob object (async job that's not ready)
         resp_str = str(resp)
         if "BatchJob" in resp_str or "job_id" in resp_str:
             st.warning("Supadata returned a BatchJob - transcript may be processing or unavailable")
             return ""
 
+        # Plain string already
         if isinstance(resp, str):
+            # Additional check for error strings
             if "BatchJob" in resp or "job_id" in resp:
                 return ""
             return resp
 
+        # Dict shapes: {"text": "..."} or {"chunks": [...]}
         if isinstance(resp, dict):
+            # Check for error or job status
             if resp.get("status") == "processing" or resp.get("job_id"):
                 st.warning("Transcript is still processing")
                 return ""
@@ -530,6 +570,7 @@ class SupadataTranscriptProvider(TranscriptProvider):
                             parts.append(v)
                 return "\n".join(parts)
 
+        # List shapes
         if isinstance(resp, list):
             parts = []
             for ch in resp:
@@ -545,10 +586,12 @@ class SupadataTranscriptProvider(TranscriptProvider):
                         parts.append(v)
             return "\n".join(parts)
 
+        # Object with .text
         v = getattr(resp, "text", None)
         if isinstance(v, str):
             return v
 
+        # Fallback stringify - but check for BatchJob pattern
         try:
             result_str = str(resp)
             if "BatchJob" not in result_str and "job_id" not in result_str:
@@ -558,18 +601,27 @@ class SupadataTranscriptProvider(TranscriptProvider):
             return ""
 
 class YouTubeAudioExtractor:
-    """Helper class to extract audio URLs from YouTube videos"""
+    """Helper class to extract audio URLs from YouTube videos for ASR"""
     
     def __init__(self):
         self.cookie_manager = YouTubeCookieManager()
     
     def extract_audio_url(self, youtube_url: str, browser: str = 'chrome') -> Optional[str]:
-        """Extract direct audio URL from YouTube video"""
+        """
+        Extract direct audio URL from YouTube video using yt-dlp.
+        Returns the best available audio stream URL for AssemblyAI.
+        
+        Args:
+            youtube_url: YouTube video URL
+            browser: Browser to extract cookies from ('chrome', 'firefox', 'edge', 'safari')
+        """
         try:
             import yt_dlp
+            import platform
             
             st.info(f"Extracting audio stream URL using yt-dlp...")
             
+            # Base options
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'noplaylist': True,
@@ -580,6 +632,7 @@ class YouTubeAudioExtractor:
                 }
             }
             
+            # Check for Render secret cookies file first
             render_cookies = '/etc/secrets/youtube_cookies.txt'
             cookies_file = None
             
@@ -587,17 +640,20 @@ class YouTubeAudioExtractor:
                 st.success(f"Found Render secret cookies file!")
                 cookies_file = render_cookies
             else:
+                # Check environment variable
                 env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
                 if env_cookies and os.path.exists(env_cookies):
                     st.info(f"Using cookies file from environment variable")
                     cookies_file = env_cookies
             
+            # Add cookies file if found
             if cookies_file:
                 ydl_opts['cookiefile'] = cookies_file
-                st.info(f"Using cookies for authentication")
+                st.info(f"Using cookies for authentication: {cookies_file}")
             else:
                 st.warning("No cookies file found - attempting without authentication")
             
+            # Try to extract audio
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(youtube_url, download=False)
@@ -605,6 +661,7 @@ class YouTubeAudioExtractor:
                     if info:
                         formats = info.get('formats', [])
                         
+                        # Try to find audio-only streams
                         audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
                         
                         if audio_formats:
@@ -613,6 +670,7 @@ class YouTubeAudioExtractor:
                             st.success(f"Found audio-only stream: {best_audio.get('format_note', 'unknown quality')}")
                             return best_audio.get('url')
                         
+                        # Fallback: find formats with audio
                         formats_with_audio = [f for f in formats if f.get('acodec') != 'none']
                         
                         if formats_with_audio:
@@ -628,7 +686,10 @@ class YouTubeAudioExtractor:
                 error_msg = str(e)
                 if "Sign in to confirm" in error_msg:
                     st.error("YouTube requires authentication - cookies may be expired or invalid")
-                    st.info("Please update your youtube_cookies.txt file")
+                    st.info("Please update your youtube_cookies.txt file in Render secrets:\n"
+                           "1. Log into YouTube in your browser\n"
+                           "2. Use 'Get cookies.txt' extension to export fresh cookies\n"
+                           "3. Update the youtube_cookies.txt secret file in Render")
                 elif "Video unavailable" in error_msg:
                     st.error("Video is unavailable or private")
                 else:
@@ -643,13 +704,13 @@ class YouTubeAudioExtractor:
             return None
 
 class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
-    """ASR provider with chunking support"""
+    """Improved ASR provider that extracts audio URLs using yt-dlp with chunking support"""
     def __init__(self, api_key: str, browser: str = 'chrome'):
         self.api_key = api_key
         self.base_url = "https://api.assemblyai.com/v2"
         self.audio_extractor = YouTubeAudioExtractor()
         self.chunker = AudioChunker()
-        self.max_duration_minutes = 60
+        self.max_duration_minutes = 60  # Chunk videos longer than 60 minutes
         self.browser = browser
     
     def get_transcript(self, url: str, language: str) -> Optional[str]:
@@ -657,6 +718,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             st.warning("AssemblyAI API key not provided")
             return None
         
+        # Step 1: Check video duration for chunking decision
         duration = self.chunker.get_video_duration(url, self.browser)
         
         if duration and duration > (self.max_duration_minutes * 60):
@@ -668,6 +730,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
     
     def _transcribe_standard(self, url: str, language: str) -> Optional[str]:
         """Standard transcription without chunking"""
+        # Step 1: Extract audio URL from YouTube video
         st.info("Step 1: Extracting audio URL from YouTube video...")
         audio_url = self.audio_extractor.extract_audio_url(url, self.browser)
         
@@ -675,6 +738,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             st.error("Cannot extract audio URL from YouTube video. ASR fallback failed.")
             return None
         
+        # Step 2: Proceed with AssemblyAI transcription using the extracted audio URL
         st.info("Step 2: Starting AssemblyAI transcription...")
         return self._transcribe_audio_url(audio_url, language)
     
@@ -698,6 +762,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                 "content-type": "application/json"
             }
             
+            # Map language codes for AssemblyAI
             language_map = {
                 "English": "en",
                 "中文": "zh",
@@ -707,10 +772,11 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             
             assemblyai_lang = language_map.get(language, "en")
             
+            # Prepare transcription request
             data = {
                 "audio_url": audio_url,
                 "language_code": assemblyai_lang,
-                "speech_model": "best"
+                "speech_model": "best"  # Use best available model
             }
             
             st.info("Submitting transcription request to AssemblyAI...")
@@ -730,20 +796,28 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
             transcript_id = response.json()['id']
             st.success(f"Transcription submitted with ID: {transcript_id}")
             
+            # Step 3: Poll for completion with progress indication
             return self._poll_for_completion(transcript_id, headers)
             
+        except requests.exceptions.Timeout:
+            st.error("Request timed out while submitting to AssemblyAI")
+            return None
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error communicating with AssemblyAI: {e}")
+            return None
         except Exception as e:
             st.error(f"AssemblyAI transcription error: {e}")
             return None
     
     def _poll_for_completion(self, transcript_id: str, headers: dict) -> Optional[str]:
-        """Poll AssemblyAI for transcription completion"""
+        """Poll AssemblyAI for transcription completion with progress updates"""
         polling_endpoint = f"{self.base_url}/transcript/{transcript_id}"
-        max_attempts = 120
+        max_attempts = 120  # 6 minutes max (3 second intervals)
         attempt = 0
         
         st.info("Polling for transcription completion...")
         
+        # Create a progress bar and status display
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -758,6 +832,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                 polling_data = polling_response.json()
                 status = polling_data.get('status', 'unknown')
                 
+                # Update status display
                 status_text.text(f"Status: {status} (attempt {attempt + 1}/{max_attempts})")
                 progress_bar.progress((attempt + 1) / max_attempts)
                 
@@ -779,6 +854,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                     return None
                     
                 elif status in ['queued', 'processing']:
+                    # Continue polling
                     time.sleep(3)
                     attempt += 1
                     
@@ -787,6 +863,9 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
                     time.sleep(3)
                     attempt += 1
             
+            except requests.exceptions.Timeout:
+                st.error("Polling request timed out")
+                return None
             except Exception as e:
                 st.error(f"Polling error: {e}")
                 return None
@@ -794,13 +873,8 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
         st.error("Transcription polling timed out after 6 minutes")
         return None
 
-# ==================== IMPROVED LLM PROVIDER WITH SUMMARY ====================
-
 class LLMProvider:
     """Base class for LLM providers"""
-    def generate_summary(self, transcript: str, language: str) -> Optional[str]:
-        raise NotImplementedError
-    
     def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
         raise NotImplementedError
 
@@ -810,76 +884,21 @@ class DeepSeekProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.temperature = temperature
+        # Initialize text chunker for long transcripts
         self.text_chunker = LLMTextChunker(
-            max_chunk_length=8000,
-            overlap_length=200
+            max_chunk_length=8000,  # Conservative for token limits
+            overlap_length=200      # Context preservation
         )
-    
-    def generate_summary(self, transcript: str, language: str) -> Optional[str]:
-        """Generate executive summary with key points - FAST mode"""
-        try:
-            if language == "English":
-                summary_prompt = """You are an expert at analyzing transcripts and creating concise executive summaries.
-
-Create a brief executive summary with the following structure:
-
-## Executive Summary
-
-### Key Points
-- List 3-5 main points from the transcript
-- Each point should be concise and impactful
-- Focus on the most important information
-
-### Main Ideas
-- Identify 2-3 core themes or concepts
-- Brief explanation of each (1-2 sentences)
-
-### Quick Overview
-- 2-3 paragraph summary of the entire content
-- Highlight the most critical information
-- Keep it under 300 words
-
-Format using markdown. Be concise and focus on value."""
-            else:
-                summary_prompt = """你是分析转录文本并创建简洁执行摘要的专家。
-
-创建以下结构的简要执行摘要：
-
-## 执行摘要
-
-### 关键要点
-- 列出转录文本中的3-5个主要观点
-- 每个要点应简洁有力
-- 专注于最重要的信息
-
-### 主要思想
-- 识别2-3个核心主题或概念
-- 每个简要说明（1-2句）
-
-### 快速概览
-- 2-3段整个内容的摘要
-- 突出最关键的信息
-- 保持在300字以内
-
-使用markdown格式。保持简洁并专注于价值。"""
-            
-            return self._make_api_request(
-                transcript[:12000],
-                summary_prompt,
-                temperature=0.3,
-                model="deepseek-chat"
-            )
-            
-        except Exception as e:
-            st.error(f"Summary generation error: {e}")
-            return None
     
     def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
         """Enhanced transcript structuring with intelligent chunking"""
         try:
+            # Determine if chunking is needed
             if not self.text_chunker.should_chunk_text(transcript):
+                # Process as single chunk
                 return self._process_single_chunk(transcript, system_prompt)
             else:
+                # Process with intelligent chunking
                 return self._process_with_chunking(transcript, system_prompt)
                 
         except Exception as e:
@@ -887,71 +906,119 @@ Format using markdown. Be concise and focus on value."""
     
     def _process_single_chunk(self, transcript: str, system_prompt: str) -> Optional[str]:
         """Process transcript as a single chunk"""
+        st.info("Processing transcript as single chunk...")
         return self._make_api_request(transcript, system_prompt)
     
     def _process_with_chunking(self, transcript: str, system_prompt: str) -> Optional[str]:
         """Process long transcript with intelligent chunking"""
+        # Create intelligent chunks
         chunks = self.text_chunker.create_intelligent_chunks(transcript)
         
         if len(chunks) == 1:
             return self._process_single_chunk(transcript, system_prompt)
         
-        st.info(f"Processing {len(chunks)} chunks for detailed structuring...")
+        st.info(f"Processing {len(chunks)} chunks with DeepSeek for better results...")
         
+        # Process chunks in parallel with context-aware prompts
+        processed_chunks = []
+        
+        # Create progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Extract language from system prompt for chunk-specific instructions
         language = "English" if "English" in system_prompt else "中文"
         
-        processed_chunks = []
-        for i, chunk_info in enumerate(chunks):
+        def process_chunk_with_context(chunk_info):
+            """Process individual chunk with context-aware prompt"""
+            chunk_id = chunk_info['chunk_id']
             chunk_text = chunk_info['text']
             
-            chunk_prompt = self._create_chunk_prompt(system_prompt, chunk_info, len(chunks), language)
-            
-            with st.spinner(f"Processing chunk {i+1}/{len(chunks)}..."):
+            try:
+                status_text.text(f"Processing chunk {chunk_id + 1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
+                
+                # Create context-aware prompt for this chunk
+                chunk_prompt = self.text_chunker.create_chunk_specific_prompt(
+                    system_prompt, chunk_info, len(chunks), language
+                )
+                
+                # Process chunk
                 result = self._make_api_request(chunk_text, chunk_prompt)
                 
-                if result:
-                    processed_chunks.append(result)
-                else:
-                    st.warning(f"Chunk {i+1} failed, skipping...")
+                return {
+                    'chunk_id': chunk_id,
+                    'result': result,
+                    'success': result is not None,
+                    'tokens_estimate': chunk_info['tokens_estimate']
+                }
+                
+            except Exception as e:
+                st.error(f"Chunk {chunk_id + 1} failed: {e}")
+                return {
+                    'chunk_id': chunk_id,
+                    'result': None,
+                    'success': False,
+                    'error': str(e)
+                }
         
-        if not processed_chunks:
+        # Process chunks with limited parallelism to avoid rate limits
+        max_workers = 2  # Conservative to avoid API rate limits
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all chunks
+            future_to_chunk = {
+                executor.submit(process_chunk_with_context, chunk): chunk 
+                for chunk in chunks
+            }
+            
+            # Collect results as they complete
+            chunk_results = []
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                try:
+                    result = future.result()
+                    chunk_results.append(result)
+                    
+                    if result['success']:
+                        st.success(f"Chunk {result['chunk_id'] + 1} processed")
+                    else:
+                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
+                    
+                    # Update progress
+                    progress_bar.progress(len(chunk_results) / len(chunks))
+                    
+                except Exception as e:
+                    st.error(f"Chunk processing error: {e}")
+        
+        # Sort results by chunk_id
+        chunk_results.sort(key=lambda x: x['chunk_id'])
+        
+        # Combine successful results
+        successful_results = []
+        failed_chunks = []
+        
+        for result in chunk_results:
+            if result['success'] and result['result']:
+                successful_results.append(result['result'])
+            else:
+                failed_chunks.append(result['chunk_id'] + 1)
+        
+        if not successful_results:
             st.error("All chunks failed to process")
             return None
         
-        return self._combine_processed_chunks(processed_chunks, language)
+        if failed_chunks:
+            st.warning(f"Chunks {failed_chunks} failed, but combining successful chunks")
+        
+        # Combine chunks intelligently
+        status_text.text("Combining processed chunks...")
+        combined_result = self._combine_processed_chunks(successful_results, language)
+        
+        progress_bar.progress(1.0)
+        status_text.text(f"Successfully processed and combined {len(successful_results)} chunks!")
+        
+        return combined_result
     
-    def _create_chunk_prompt(self, base_prompt: str, chunk_info: Dict, total_chunks: int, language: str) -> str:
-        """Create context-aware prompt for chunk"""
-        chunk_id = chunk_info['chunk_id']
-        is_final = chunk_info.get('is_final_chunk', False)
-        
-        if chunk_info.get('is_single_chunk', False):
-            return base_prompt
-        
-        if language == "English":
-            chunk_context = f"""
-CHUNK CONTEXT: Processing chunk {chunk_id + 1} of {total_chunks}
-- Process ONLY this chunk's content
-- {"This is the FINAL chunk" if is_final else "More chunks follow"}
-"""
-        else:
-            chunk_context = f"""
-分块上下文：处理第 {chunk_id + 1} 块，共 {total_chunks} 块
-- 仅处理此块内容
-- {"这是最后一块" if is_final else "后续还有更多块"}
-"""
-        
-        return chunk_context + base_prompt
-    
-    def _combine_processed_chunks(self, chunks: List[str], language: str) -> str:
-        """Combine processed chunks"""
-        if len(chunks) == 1:
-            return chunks[0]
-        
-        separator = "\n\n---\n\n"
-        return separator.join(chunks)
-    
-    def _make_api_request(self, text: str, system_prompt: str, temperature: Optional[float] = None, model: Optional[str] = None) -> Optional[str]:
+    def _make_api_request(self, text: str, system_prompt: str) -> Optional[str]:
         """Make API request to DeepSeek"""
         try:
             endpoint = self.base_url + "/chat/completions"
@@ -960,19 +1027,20 @@ CHUNK CONTEXT: Processing chunk {chunk_id + 1} of {total_chunks}
                 "Authorization": f"Bearer {self.api_key}",
             }
             payload = {
-                "model": model or self.model,
+                "model": self.model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text},
                 ],
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature,
             }
 
+            # Increased timeout for better reliability with longer transcripts
             resp = requests.post(
                 endpoint, 
                 headers=headers, 
                 data=json.dumps(payload), 
-                timeout=180
+                timeout=180  # Increased to 180 seconds for deepseek-reasoner
             )
             
             if resp.status_code != 200:
@@ -998,18 +1066,45 @@ CHUNK CONTEXT: Processing chunk {chunk_id + 1} of {total_chunks}
             
         except requests.exceptions.Timeout:
             raise RuntimeError("DeepSeek API request timed out after 180 seconds")
+        except requests.exceptions.ConnectionError:
+            raise RuntimeError("Failed to connect to DeepSeek API - check internet connection")
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"DeepSeek API network error: {str(e)}")
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
+    
+    def _combine_processed_chunks(self, chunk_results: List[str], language: str) -> str:
+        """Intelligently combine processed chunks into final document"""
+        if len(chunk_results) == 1:
+            return chunk_results[0]
+        
+        # Simple combination with section separation
+        if language == "English":
+            separator = "\n\n---\n\n"
+            header = "# Combined Structured Transcript\n\n"
+            footer = "\n\n---\n*This document was processed in multiple chunks for optimal LLM performance.*"
+        else:  # Chinese
+            separator = "\n\n---\n\n"
+            header = "# 合并结构化转录文稿\n\n"
+            footer = "\n\n---\n*本文档经过多块处理以获得最佳LLM性能。*"
+        
+        # Combine chunks
+        combined = header + separator.join(chunk_results) + footer
+        
+        return combined
 
 class YouTubeDataProvider:
-    """Provider for YouTube Data API operations"""
+    """Provider for YouTube Data API operations using direct HTTP requests"""
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://www.googleapis.com/youtube/v3"
-        self.available = bool(api_key)
+        self.available = bool(api_key)  # Simple check - just need API key
     
     def get_playlist_videos(self, playlist_url: str) -> List[Dict[str, str]]:
-        """Extract video URLs from a YouTube playlist"""
+        """
+        Extract video URLs from a YouTube playlist using YouTube Data API v3.
+        Returns list of dicts with 'title', 'url', and 'video_id' keys.
+        """
         if not self.available or not self.api_key:
             st.error("YouTube Data API key not available.")
             return []
@@ -1024,6 +1119,7 @@ class YouTubeDataProvider:
             next_page_token = None
             
             while True:
+                # Build the API request URL
                 params = {
                     'part': 'snippet',
                     'playlistId': playlist_id,
@@ -1034,6 +1130,7 @@ class YouTubeDataProvider:
                 if next_page_token:
                     params['pageToken'] = next_page_token
                 
+                # Make the HTTP request
                 response = requests.get(
                     f"{self.base_url}/playlistItems",
                     params=params,
@@ -1041,11 +1138,20 @@ class YouTubeDataProvider:
                 )
                 
                 if response.status_code != 200:
-                    st.error(f"YouTube API error ({response.status_code})")
+                    error_msg = f"YouTube API error ({response.status_code})"
+                    try:
+                        error_data = response.json()
+                        if 'error' in error_data:
+                            error_msg += f": {error_data['error'].get('message', 'Unknown error')}"
+                    except:
+                        error_msg += f": {response.text[:200]}"
+                    
+                    st.error(error_msg)
                     return []
                 
                 playlist_response = response.json()
                 
+                # Process the items
                 for item in playlist_response.get('items', []):
                     snippet = item.get('snippet', {})
                     resource_id = snippet.get('resourceId', {})
@@ -1061,18 +1167,25 @@ class YouTubeDataProvider:
                             'video_id': video_id
                         })
                 
+                # Check for next page
                 next_page_token = playlist_response.get('nextPageToken')
                 if not next_page_token:
                     break
             
             return videos
             
+        except requests.exceptions.Timeout:
+            st.error("YouTube API request timed out")
+            return []
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network error accessing YouTube API: {e}")
+            return []
         except Exception as e:
-            st.error(f"Error processing playlist: {e}")
+            st.error(f"Error processing YouTube API response: {e}")
             return []
     
     def extract_playlist_id(self, url: str) -> Optional[str]:
-        """Extract playlist ID from URL"""
+        """Extract playlist ID from YouTube playlist URL"""
         match = re.search(r'list=([\w-]+)', url)
         return match.group(1) if match else None
 
@@ -1090,57 +1203,58 @@ class TranscriptOrchestrator:
         self.llm_provider = llm_provider
     
     def get_transcript(self, url: str, language: str, use_fallback: bool = False) -> Optional[str]:
+        # Try primary provider first
         st.info("Trying primary transcript provider (Supadata)...")
         transcript = self.transcript_provider.get_transcript(url, language)
         
+        # Validate transcript quality
         def is_valid_transcript(text):
             """Check if transcript is valid and substantial enough"""
             if not text:
                 return False
             
+            # Check if it's just an error object string
             if "BatchJob" in str(text) or "job_id" in str(text):
-                st.warning("Received job object instead of transcript")
+                st.warning("Received job object instead of transcript - transcript not ready or unavailable")
                 return False
             
+            # Remove whitespace and check length
             cleaned = text.strip()
-            if len(cleaned) < 100:
-                st.warning(f"Transcript too short ({len(cleaned)} characters)")
+            if len(cleaned) < 100:  # Less than 100 characters is too short
+                st.warning(f"Transcript too short ({len(cleaned)} characters) - likely invalid")
                 return False
             
+            # Check word count
             word_count = len(cleaned.split())
-            if word_count < 20:
-                st.warning(f"Transcript has only {word_count} words")
+            if word_count < 20:  # Less than 20 words is suspiciously short
+                st.warning(f"Transcript has only {word_count} words - likely invalid")
                 return False
             
             return True
         
+        # Check if transcript is valid
         if not is_valid_transcript(transcript):
             transcript = None
-            st.warning("Primary provider returned invalid transcript")
+            st.warning("Primary provider returned invalid or too short transcript")
         
+        # If no valid transcript and fallback is enabled, try ASR
         if not transcript and use_fallback and self.asr_fallback_provider:
-            st.info("Trying ASR fallback (AssemblyAI)...")
+            st.info("No valid transcript from primary provider. Trying ASR fallback (AssemblyAI with chunking)...")
             transcript = self.asr_fallback_provider.get_transcript(url, language)
             
+            # Validate ASR transcript too
             if not is_valid_transcript(transcript):
-                st.error("ASR also failed to produce valid transcript")
+                st.error("ASR also failed to produce a valid transcript")
                 transcript = None
         
-        if transcript:
-            st.success(f"Transcript obtained ({len(transcript)} chars, {len(transcript.split())} words)")
+        if not transcript:
+            st.warning("No transcript available from any provider")
         else:
-            st.warning("No transcript available")
+            st.success(f"Transcript obtained successfully ({len(transcript)} characters, {len(transcript.split())} words)")
             
         return transcript
     
-    def generate_summary(self, transcript: str, language: str) -> Optional[str]:
-        """Generate executive summary"""
-        if not self.llm_provider:
-            return None
-        return self.llm_provider.generate_summary(transcript, language)
-    
     def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
-        """Structure full transcript"""
         if not self.llm_provider:
             return None
         return self.llm_provider.structure_transcript(transcript, system_prompt)
@@ -1152,6 +1266,7 @@ def login_page():
     st.title("YouTube Transcript Processor")
     st.subheader("Login Required")
     
+    # Show default credentials info
     st.info("**Default Login:** Username: `admin` | Password: `admin123`")
     
     with st.form("login_form"):
@@ -1178,10 +1293,218 @@ def login_page():
     
     return False
 
-def get_default_prompt(language: str) -> str:
-    """Get default system prompt"""
-    if language == "English":
-        return """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
+def main_app():
+    """Main application interface"""
+    st.title("YouTube Transcript Processor")
+    
+    # Logout button
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        if st.button("Logout"):
+            for key in ['authenticated', 'username', 'api_keys']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+    
+    st.write(f"Welcome, **{st.session_state.username}**!")
+    
+    # Get API keys from session
+    api_keys = st.session_state.get('api_keys', {})
+    
+    # Configuration Section
+    st.header("Configuration")
+    
+    with st.expander("API Status", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if api_keys.get('supadata'):
+                st.success("Supadata")
+            else:
+                st.error("Supadata")
+        
+        with col2:
+            if api_keys.get('assemblyai'):
+                st.success("AssemblyAI")
+            else:
+                st.error("AssemblyAI")
+        
+        with col3:
+            if api_keys.get('deepseek'):
+                st.success("DeepSeek")
+            else:
+                st.error("DeepSeek")
+        
+        with col4:
+            if api_keys.get('youtube'):
+                st.success("YouTube Data")
+            else:
+                st.error("YouTube Data")
+    
+    # Settings
+    with st.expander("Processing Settings"):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            language = st.selectbox(
+                "Language",
+                ["English", "中文"],
+                help="Select the language for transcription"
+            )
+            
+            use_asr_fallback = st.checkbox(
+                "Enable ASR Fallback",
+                value=True,
+                help="Use AssemblyAI when official captions are not available"
+            )
+        
+        with col2:
+            deepseek_model = st.selectbox(
+                "DeepSeek Model",
+                ["deepseek-chat", "deepseek-reasoner"],
+                index=1,
+                help="Select the DeepSeek model to use"
+            )
+            
+            temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.1,
+                step=0.1,
+                help="Controls randomness in LLM responses"
+            )
+        
+        with col3:
+            browser_for_cookies = st.selectbox(
+                "Browser for YouTube Cookies",
+                ["none", "chrome", "firefox", "edge", "safari"],
+                help="Select browser for cookies (use 'none' on Linux/servers)"
+            )
+            
+            # Option to upload cookies file
+            st.info("For Linux/Server: Upload cookies.txt file or set YOUTUBE_COOKIES_FILE env var")
+    
+    # Cookie file upload section (for Linux/containers)
+    with st.expander("YouTube Authentication (for ASR)", expanded=False):
+        # Check for Render secret file
+        render_cookies = '/etc/secrets/youtube_cookies.txt'
+        if os.path.exists(render_cookies):
+            st.success(f"✅ Render secret cookies file found: {render_cookies}")
+            st.info("The app will automatically use this file for YouTube authentication")
+        else:
+            # Check for environment variable
+            env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
+            if env_cookies and os.path.exists(env_cookies):
+                st.success(f"✅ Cookies file from environment: {env_cookies}")
+            else:
+                st.warning("⚠️ No cookies file found in /etc/secrets/youtube_cookies.txt")
+                st.info("**To fix this on Render:**\n"
+                       "1. Export cookies from YouTube (logged in)\n"
+                       "2. Add as Secret File in Render Dashboard\n"
+                       "3. Name it: youtube_cookies.txt")
+        
+        st.markdown("---")
+        st.info("**Manual Cookie Upload (Alternative):**")
+        st.markdown("""
+        1. Install browser extension: 'Get cookies.txt' or 'cookies.txt'
+        2. Log into YouTube in your browser
+        3. Export cookies using the extension
+        4. Upload the cookies.txt file below
+        """)
+        
+        uploaded_cookies = st.file_uploader(
+            "Upload cookies.txt file (optional)",
+            type=['txt'],
+            help="Upload YouTube cookies exported from browser"
+        )
+        
+        if uploaded_cookies:
+            # Save uploaded cookies to temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                content = uploaded_cookies.read().decode('utf-8')
+                f.write(content)
+                cookies_path = f.name
+            
+            os.environ['YOUTUBE_COOKIES_FILE'] = cookies_path
+            st.success(f"Cookies file uploaded and set: {cookies_path}")
+    
+    # Main Processing Section
+    st.header("Process Video")
+    
+    # Input methods
+    input_method = st.radio(
+        "Input Method",
+        ["Single Video URL", "Playlist URL", "Batch URLs"],
+        help="Choose how to input videos"
+    )
+    
+    videos_to_process = []
+    
+    if input_method == "Single Video URL":
+        video_url = st.text_input(
+            "YouTube Video URL",
+            placeholder="https://www.youtube.com/watch?v=...",
+            help="Enter a single YouTube video URL"
+        )
+        if video_url:
+            videos_to_process = [{"title": "Single Video", "url": video_url}]
+    
+    elif input_method == "Playlist URL":
+        playlist_url = st.text_input(
+            "YouTube Playlist URL",
+            placeholder="https://www.youtube.com/playlist?list=...",
+            help="Enter a YouTube playlist URL"
+        )
+        if playlist_url and api_keys.get('youtube'):
+            if st.button("Load Playlist"):
+                with st.spinner("Loading playlist videos..."):
+                    youtube_provider = YouTubeDataProvider(api_keys['youtube'])
+                    videos_to_process = youtube_provider.get_playlist_videos(playlist_url)
+                    if videos_to_process:
+                        st.success(f"Loaded {len(videos_to_process)} videos from playlist")
+                        st.session_state.playlist_videos = videos_to_process
+    
+    elif input_method == "Batch URLs":
+        batch_urls = st.text_area(
+            "YouTube Video URLs (one per line)",
+            placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...",
+            help="Enter multiple YouTube video URLs, one per line"
+        )
+        if batch_urls:
+            urls = [url.strip() for url in batch_urls.split('\n') if url.strip()]
+            videos_to_process = [{"title": f"Video {i+1}", "url": url} for i, url in enumerate(urls)]
+    
+    # Show loaded videos
+    if input_method == "Playlist URL" and 'playlist_videos' in st.session_state:
+        videos_to_process = st.session_state.playlist_videos
+    
+    if videos_to_process:
+        st.subheader(f"Videos to Process ({len(videos_to_process)})")
+        
+        # Show video selection for playlists/batch
+        if len(videos_to_process) > 1:
+            with st.expander("Select Videos to Process", expanded=True):
+                selected_videos = []
+                select_all = st.checkbox("Select All", value=True)
+                
+                for i, video in enumerate(videos_to_process):
+                    if select_all:
+                        selected = True
+                    else:
+                        selected = st.checkbox(f"{video['title'][:50]}...", key=f"video_{i}")
+                    
+                    if selected:
+                        selected_videos.append(video)
+                
+                videos_to_process = selected_videos
+        
+        # Custom system prompt
+        st.subheader("System Prompt")
+        
+        default_prompts = {
+            "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
 
 Please structure the transcript following these guidelines:
 
@@ -1197,9 +1520,9 @@ Please structure the transcript following these guidelines:
 5. **Add timestamps** where natural topic transitions occur
 6. **Maintain the speaker's tone and meaning** while improving clarity
 
-Format the output as a clean, professional document that would be easy to read and reference."""
-    else:
-        return """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
+Format the output as a clean, professional document that would be easy to read and reference.""",
+            
+            "中文": """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
 
 请按照以下指导原则来结构化转录文本：
 
@@ -1216,9 +1539,30 @@ Format the output as a clean, professional document that would be easy to read a
 6. **保持说话者的语调和意思**，同时提高清晰度
 
 将输出格式化为一个清洁、专业的文档，便于阅读和参考。"""
+        }
+        
+        system_prompt = st.text_area(
+            "System Prompt",
+            value=default_prompts[language],
+            height=200,
+            help="Customize how the AI should structure the transcript"
+        )
+        
+        # Processing button
+        if st.button("Start Processing", type="primary"):
+            if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
+                st.error("No transcript providers available. Please configure API keys.")
+                return
+            
+            if not api_keys.get('deepseek'):
+                st.error("DeepSeek API key required for structuring. Please configure API keys.")
+                return
+            
+            process_videos(videos_to_process, language, use_asr_fallback, system_prompt, 
+                          deepseek_model, temperature, api_keys, browser_for_cookies)
 
-def process_videos_improved(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser, user_data):
-    """Improved video processing with summary first approach"""
+def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
+    """Process multiple videos"""
     
     # Initialize providers
     supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
@@ -1254,265 +1598,86 @@ def process_videos_improved(videos, language, use_asr_fallback, system_prompt, d
                 st.error("Failed to get transcript")
                 continue
             
-            # Create containers for async display
-            summary_container = st.container()
-            detailed_container = st.container()
-            
-            # Step 2: Generate Executive Summary FIRST (fast)
-            summary = None
-            with summary_container:
-                with st.spinner("Generating executive summary..."):
-                    summary = orchestrator.generate_summary(transcript, language)
+            # Show transcript preview
+            with st.expander("Raw Transcript Preview"):
+                # Show first 5000 characters or full transcript if shorter
+                preview_length = 5000  # Increase this for longer preview
+                preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
+                st.text_area(
+                    "Transcript", 
+                    preview_text, 
+                    height=400,  # Increased height for more content
+                    help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
+                )
                 
-                if summary:
-                    st.success("Executive Summary Ready!")
-                    
-                    with st.expander("Executive Summary", expanded=True):
-                        st.markdown(summary)
-                        
-                        st.download_button(
-                            "Download Summary",
-                            summary,
-                            file_name=f"summary_{video['title'][:30]}.md",
-                            mime="text/markdown",
-                            key=f"summary_download_{i}"
+                # Option to show full transcript
+                if len(transcript) > preview_length:
+                    if st.checkbox("Show full transcript", key=f"show_full_{i}"):
+                        st.text_area(
+                            "Full Transcript", 
+                            transcript, 
+                            height=600,
+                            help=f"Complete transcript ({len(transcript)} characters)"
                         )
-                else:
-                    st.warning("Could not generate summary")
             
-            # Step 3: Process detailed transcript
-            structured = None
-            with detailed_container:
-                st.info("Processing detailed transcript (this may take a moment)...")
-                
-                progress_text = st.empty()
-                progress_text.text("Structuring transcript with AI...")
-                
-                with st.spinner("Creating detailed structured document..."):
-                    structured = orchestrator.structure_transcript(transcript, system_prompt)
-                
-                progress_text.empty()
-                
-                if structured:
-                    st.success("Detailed Transcript Ready!")
-                    
-                    with st.expander("Detailed Structured Transcript"):
-                        st.markdown(structured[:2000] + "..." if len(structured) > 2000 else structured)
-                        
-                        if len(structured) > 2000:
-                            if st.checkbox("Show full transcript", key=f"show_full_{i}"):
-                                st.markdown(structured)
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.download_button(
-                            "Download Raw Transcript",
-                            transcript,
-                            file_name=f"raw_{video['title'][:30]}.txt",
-                            mime="text/plain",
-                            key=f"raw_download_{i}"
-                        )
-                    with col2:
-                        st.download_button(
-                            "Download Structured Transcript",
-                            structured,
-                            file_name=f"structured_{video['title'][:30]}.md",
-                            mime="text/markdown",
-                            key=f"structured_download_{i}"
-                        )
-                else:
-                    st.error("Failed to structure transcript")
+            # Step 2: Structure transcript
+            with st.spinner("Structuring transcript with LLM..."):
+                structured = orchestrator.structure_transcript(transcript, system_prompt)
             
-            # Save to history
-            history_entry = {
-                'url': video['url'],
-                'title': video['title'],
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M"),
-                'transcript': transcript,
-                'summary': summary,
-                'structured': structured
-            }
-            user_data.add_to_history(history_entry)
+            if not structured:
+                st.error("Failed to structure transcript")
+                continue
+            
+            # Display results
+            st.success("Processing completed!")
+            
+            # Show structured result
+            with st.expander("Structured Transcript", expanded=True):
+                st.markdown(structured)
+            
+            # Download options
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "Download Raw Transcript",
+                    transcript,
+                    file_name=f"raw_transcript_{i+1}.txt",
+                    mime="text/plain"
+                )
+            
+            with col2:
+                st.download_button(
+                    "Download Structured Transcript",
+                    structured,
+                    file_name=f"structured_transcript_{i+1}.md",
+                    mime="text/markdown"
+                )
             
             st.divider()
             
         except Exception as e:
             st.error(f"Error processing video: {str(e)}")
             continue
-    
-    st.success("All videos processed successfully!")
 
-def main_app():
-    """Main application interface"""
-    st.title("YouTube Transcript Processor")
+# ==================== MAIN ENTRY POINT ====================
+
+def main():
+    """Main entry point"""
+    st.set_page_config(
+        page_title="YouTube Transcript Processor",
+        page_icon="🎬",
+        layout="wide"
+    )
     
-    # Initialize user data manager
-    if 'user_data_manager' not in st.session_state:
-        st.session_state.user_data_manager = UserDataManager(st.session_state.username)
+    # Initialize session state
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
     
-    user_data = st.session_state.user_data_manager
-    
-    # Logout button
-    col1, col2 = st.columns([6, 1])
-    with col2:
-        if st.button("Logout"):
-            user_data.save_data()
-            for key in ['authenticated', 'username', 'api_keys', 'user_data_manager']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
-    
-    st.write(f"Welcome, **{st.session_state.username}**!")
-    
-    # Get API keys from session
-    api_keys = st.session_state.get('api_keys', {})
-    
-    # Load saved settings
-    saved_settings = user_data.get_settings()
-    
-    # Tabs for main interface
-    tab1, tab2, tab3 = st.tabs(["Process Video", "History", "Settings"])
-    
-    with tab1:
-        st.header("Process Video")
-        
-        # Quick Mode Toggle
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            quick_mode = st.checkbox(
-                "Quick Mode",
-                value=True,
-                help="Use faster model (deepseek-chat) for quicker results"
-            )
-        
-        # Input methods
-        input_method = st.radio(
-            "Input Method",
-            ["Single Video URL", "Playlist URL", "Batch URLs"],
-            help="Choose how to input videos"
-        )
-        
-        videos_to_process = []
-        
-        if input_method == "Single Video URL":
-            video_url = st.text_input(
-                "YouTube Video URL",
-                placeholder="https://www.youtube.com/watch?v=...",
-                help="Enter a single YouTube video URL"
-            )
-            if video_url:
-                videos_to_process = [{"title": "Single Video", "url": video_url}]
-        
-        elif input_method == "Playlist URL":
-            playlist_url = st.text_input(
-                "YouTube Playlist URL",
-                placeholder="https://www.youtube.com/playlist?list=...",
-                help="Enter a YouTube playlist URL"
-            )
-            if playlist_url and api_keys.get('youtube'):
-                if st.button("Load Playlist"):
-                    with st.spinner("Loading playlist videos..."):
-                        youtube_provider = YouTubeDataProvider(api_keys['youtube'])
-                        videos_to_process = youtube_provider.get_playlist_videos(playlist_url)
-                        if videos_to_process:
-                            st.success(f"Loaded {len(videos_to_process)} videos")
-                            st.session_state.playlist_videos = videos_to_process
-        
-        elif input_method == "Batch URLs":
-            batch_urls = st.text_area(
-                "YouTube Video URLs (one per line)",
-                placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...",
-                help="Enter multiple YouTube video URLs, one per line"
-            )
-            if batch_urls:
-                urls = [url.strip() for url in batch_urls.split('\n') if url.strip()]
-                videos_to_process = [{"title": f"Video {i+1}", "url": url} for i, url in enumerate(urls)]
-        
-        # Show loaded videos
-        if input_method == "Playlist URL" and 'playlist_videos' in st.session_state:
-            videos_to_process = st.session_state.playlist_videos
-        
-        if videos_to_process:
-            st.subheader(f"Videos to Process ({len(videos_to_process)})")
-            
-            # Process button
-            if st.button("Start Processing", type="primary"):
-                language = saved_settings.get('language', 'English')
-                use_asr_fallback = saved_settings.get('use_asr_fallback', True)
-                deepseek_model = "deepseek-chat" if quick_mode else saved_settings.get('deepseek_model', 'deepseek-chat')
-                temperature = saved_settings.get('temperature', 0.1)
-                browser_for_cookies = saved_settings.get('browser_for_cookies', 'none')
-                system_prompt = saved_settings.get('system_prompt') or get_default_prompt(language)
-                
-                if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
-                    st.error("No transcript providers available. Configure API keys in Settings.")
-                    return
-                
-                if not api_keys.get('deepseek'):
-                    st.error("DeepSeek API key required. Configure in Settings.")
-                    return
-                
-                process_videos_improved(
-                    videos_to_process, language, use_asr_fallback, 
-                    system_prompt, deepseek_model, temperature, 
-                    api_keys, browser_for_cookies, user_data
-                )
-    
-    with tab2:
-        st.header("Processing History")
-        
-        history = user_data.get_history()
-        if history:
-            for entry in history[:10]:
-                with st.expander(f"{entry['title']} - {entry.get('timestamp', 'Unknown time')}"):
-                    st.write(f"**URL:** {entry['url']}")
-                    
-                    if entry.get('summary'):
-                        st.markdown("### Executive Summary")
-                        st.markdown(entry['summary'])
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        if entry.get('transcript'):
-                            st.download_button(
-                                "Raw Transcript",
-                                entry['transcript'],
-                                file_name=f"transcript_{entry['title'][:30]}.txt",
-                                mime="text/plain"
-                            )
-                    with col2:
-                        if entry.get('summary'):
-                            st.download_button(
-                                "Summary",
-                                entry['summary'],
-                                file_name=f"summary_{entry['title'][:30]}.md",
-                                mime="text/markdown"
-                            )
-                    with col3:
-                        if entry.get('structured'):
-                            st.download_button(
-                                "Structured",
-                                entry['structured'],
-                                file_name=f"structured_{entry['title'][:30]}.md",
-                                mime="text/markdown"
-                            )
-        else:
-            st.info("No processing history yet")
-    
-    with tab3:
-        st.header("Settings")
-        
-        with st.form("settings_form"):
-            st.subheader("Processing Settings")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                language = st.selectbox(
-                    "Language",
-                    ["English", "中文"],
-                    index=0 if saved_settings.get('language', 'English') == 'English' else 1,
-                    help="Select transcription language"
-                )
-                
-                use
+    # Show appropriate page
+    if not st.session_state.authenticated:
+        login_page()
+    else:
+        main_app()
+
+if __name__ == "__main__":
+    main()
