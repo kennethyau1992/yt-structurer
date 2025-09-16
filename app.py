@@ -1,770 +1,871 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-YouTube Transcript Processor with Executive Summary and Persistent Data
-Complete application with all improvements implemented
-"""
-
-import os
-import re
-import json
-import time
-import hashlib
-import pickle
-import concurrent.futures
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Any
-import requests
-import streamlit as st
-
-# ==================== PERSISTENCE LAYER ====================
-
-class UserDataManager:
-    """Manages user settings and history persistence"""
-    
-    def __init__(self, username: str):
-        self.username = username
-        self.data_dir = Path("user_data")
-        self.data_dir.mkdir(exist_ok=True)
-        self.user_file = self.data_dir / f"{username}_data.pkl"
-        self.load_data()
-    
-    def load_data(self):
-        """Load user data from file"""
-        if self.user_file.exists():
-            try:
-                with open(self.user_file, 'rb') as f:
-                    self.data = pickle.load(f)
-            except:
-                self.data = self.get_default_data()
-        else:
-            self.data = self.get_default_data()
-    
-    def get_default_data(self):
-        """Get default user data structure"""
-        return {
-            'settings': {
-                'language': 'English',
-                'use_asr_fallback': True,
-                'deepseek_model': 'deepseek-chat',
-                'temperature': 0.1,
-                'browser_for_cookies': 'none',
-                'system_prompt': None
-            },
-            'history': [],
-            'api_keys': {}
-        }
-    
-    def save_data(self):
-        """Save user data to file"""
-        try:
-            with open(self.user_file, 'wb') as f:
-                pickle.dump(self.data, f)
-        except Exception as e:
-            st.warning(f"Could not save user data: {e}")
-    
-    def get_settings(self):
-        """Get user settings"""
-        return self.data.get('settings', {})
-    
-    def update_settings(self, settings: dict):
-        """Update user settings"""
-        self.data['settings'].update(settings)
-        self.save_data()
-    
-    def add_to_history(self, entry: dict):
-        """Add entry to history"""
-        self.data['history'].insert(0, entry)
-        self.data['history'] = self.data['history'][:50]
-        self.save_data()
-    
-    def get_history(self):
-        """Get user history"""
-        return self.data.get('history', [])
-
-# ==================== AUTHENTICATION LAYER ====================
-
-class AuthManager:
-    """Simple authentication manager for storing user credentials"""
-    
-    def __init__(self):
-        self.users = {
-            "admin": {
-                "password_hash": self._hash_password("admin123"),
-                "api_keys": {
-                    "supadata": os.getenv("ADMIN_SUPADATA_KEY", ""),
-                    "assemblyai": os.getenv("ADMIN_ASSEMBLYAI_KEY", ""),
-                    "deepseek": os.getenv("ADMIN_DEEPSEEK_KEY", ""),
-                    "youtube": os.getenv("ADMIN_YOUTUBE_KEY", "")
-                }
-            }
-        }
-        self._load_users_from_env()
-    
-    def _hash_password(self, password: str) -> str:
-        """Simple password hashing"""
-        return hashlib.sha256(password.encode()).hexdigest()
-    
-    def _load_users_from_env(self):
-        """Load users from environment variables"""
-        env_users = {}
-        
-        for key, value in os.environ.items():
-            if key.endswith('_PASSWORD'):
-                username = key[:-9].lower()
-                if username not in env_users:
-                    env_users[username] = {"api_keys": {}}
-                env_users[username]["password_hash"] = self._hash_password(value)
-                
-            elif key.endswith('_SUPADATA_KEY'):
-                username = key[:-13].lower()
-                if username not in env_users:
-                    env_users[username] = {"api_keys": {}}
-                env_users[username]["api_keys"]["supadata"] = value
-                
-            elif key.endswith('_ASSEMBLYAI_KEY'):
-                username = key[:-14].lower()
-                if username not in env_users:
-                    env_users[username] = {"api_keys": {}}
-                env_users[username]["api_keys"]["assemblyai"] = value
-                
-            elif key.endswith('_DEEPSEEK_KEY'):
-                username = key[:-12].lower()
-                if username not in env_users:
-                    env_users[username] = {"api_keys": {}}
-                env_users[username]["api_keys"]["deepseek"] = value
-                
-            elif key.endswith('_YOUTUBE_KEY'):
-                username = key[:-12].lower()
-                if username not in env_users:
-                    env_users[username] = {"api_keys": {}}
-                env_users[username]["api_keys"]["youtube"] = value
-        
-        for username, user_data in env_users.items():
-            if username in self.users:
-                self.users[username]["api_keys"].update(user_data["api_keys"])
-            else:
-                self.users[username] = user_data
-    
-    def authenticate(self, username: str, password: str) -> bool:
-        """Authenticate user credentials"""
-        if username in self.users:
-            return self.users[username]["password_hash"] == self._hash_password(password)
-        return False
-    
-    def get_user_api_keys(self, username: str) -> Dict[str, str]:
-        """Get API keys for authenticated user"""
-        if username in self.users:
-            return self.users[username]["api_keys"]
-        return {}
-
-# ==================== YOUTUBE COOKIE MANAGER ====================
-
-class YouTubeCookieManager:
-    """Manages YouTube cookies for yt-dlp to bypass bot detection"""
-    
-    @staticmethod
-    def get_ydl_opts(use_cookies: bool = True, browser: str = 'chrome') -> dict:
-        """Get yt-dlp options with cookie configuration"""
-        base_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
-        
-        if use_cookies:
-            render_cookies = '/etc/secrets/youtube_cookies.txt'
-            if os.path.exists(render_cookies):
-                base_opts['cookiefile'] = render_cookies
-            else:
-                cookies_file = os.getenv('YOUTUBE_COOKIES_FILE')
-                if cookies_file and os.path.exists(cookies_file):
-                    base_opts['cookiefile'] = cookies_file
-                else:
-                    import platform
-                    if platform.system() != 'Linux' and browser != 'none':
-                        base_opts['cookiesfrombrowser'] = (browser,)
-        
-        base_opts['headers'] = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }
-        
-        return base_opts
-
-# ==================== CHUNKING LAYER ====================
-
-class AudioChunker:
-    """Handles chunking of long audio files for transcription"""
-    
-    def __init__(self, chunk_duration_minutes: int = 12):
-        self.chunk_duration_seconds = chunk_duration_minutes * 60
-        self.max_parallel_chunks = 3
-        self.cookie_manager = YouTubeCookieManager()
-    
-    def get_video_duration(self, youtube_url: str, browser: str = 'chrome') -> Optional[int]:
-        """Get video duration in seconds using yt-dlp"""
-        try:
-            import yt_dlp
-            
-            ydl_opts = self.cookie_manager.get_ydl_opts(use_cookies=True, browser=browser)
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(youtube_url, download=False)
-                duration = info.get('duration')
-                return int(duration) if duration else None
-                
-        except Exception as e:
-            st.warning(f"Could not get video duration: {e}")
-            return None
-    
-    def extract_chunked_audio_urls(self, youtube_url: str, browser: str = 'chrome') -> List[Dict[str, Any]]:
-        """Extract audio URLs for video chunks"""
-        try:
-            import yt_dlp
-            
-            duration = self.get_video_duration(youtube_url, browser)
-            if not duration:
-                st.error("Could not determine video duration for chunking")
-                return []
-            
-            if duration <= self.chunk_duration_seconds:
-                st.info(f"Video is {duration//60}m {duration%60}s - no chunking needed")
-                return []
-            
-            st.info(f"Video is {duration//60}m {duration%60}s - will chunk into {self.chunk_duration_seconds//60}-minute segments")
-            
-            num_chunks = (duration + self.chunk_duration_seconds - 1) // self.chunk_duration_seconds
-            
-            chunks = []
-            for i in range(num_chunks):
-                start_time = i * self.chunk_duration_seconds
-                end_time = min((i + 1) * self.chunk_duration_seconds, duration)
-                
-                ydl_opts = self.cookie_manager.get_ydl_opts(use_cookies=True, browser=browser)
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'noplaylist': True,
-                })
-                
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
-                    formats = info.get('formats', [])
-                    
-                    audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                    if not audio_formats:
-                        audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                    
-                    if audio_formats:
-                        best_audio = max(audio_formats, key=lambda x: x.get('abr', 0) or 0)
-                        chunks.append({
-                            'chunk_id': i,
-                            'start_time': start_time,
-                            'end_time': end_time,
-                            'duration': end_time - start_time,
-                            'audio_url': best_audio.get('url'),
-                            'format_note': best_audio.get('format_note', 'unknown')
-                        })
-            
-            return chunks
-            
-        except Exception as e:
-            st.error(f"Error extracting chunked audio URLs: {e}")
-            return []
-    
-    def transcribe_chunks_parallel(self, chunks: List[Dict], assemblyai_provider, language: str) -> Optional[str]:
-        """Transcribe multiple chunks in parallel and combine results"""
-        if not chunks:
-            return None
-        
-        st.info(f"Processing {len(chunks)} chunks in parallel...")
-        
-        def transcribe_single_chunk(chunk_info):
-            chunk_id = chunk_info['chunk_id']
-            start_time = chunk_info['start_time']
-            end_time = chunk_info['end_time']
-            audio_url = chunk_info['audio_url']
-            
-            try:
-                st.info(f"Chunk {chunk_id + 1}: {start_time//60}m{start_time%60}s - {end_time//60}m{end_time%60}s")
-                
-                transcript = assemblyai_provider._transcribe_audio_url(audio_url, language)
-                
-                return {
-                    'chunk_id': chunk_id,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'transcript': transcript,
-                    'success': transcript is not None
-                }
-                
-            except Exception as e:
-                st.error(f"Chunk {chunk_id + 1} failed: {e}")
-                return {
-                    'chunk_id': chunk_id,
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'transcript': None,
-                    'success': False,
-                    'error': str(e)
-                }
-        
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_parallel_chunks) as executor:
-            future_to_chunk = {
-                executor.submit(transcribe_single_chunk, chunk): chunk 
-                for chunk in chunks
-            }
-            
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                chunk = future_to_chunk[future]
-                try:
-                    result = future.result()
-                    results.append(result)
-                    
-                    if result['success']:
-                        st.success(f"Chunk {result['chunk_id'] + 1} completed")
-                    else:
-                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
-                        
-                except Exception as e:
-                    st.error(f"Chunk processing error: {e}")
-        
-        results.sort(key=lambda x: x['chunk_id'])
-        
-        successful_transcripts = []
-        failed_chunks = []
-        
-        for result in results:
-            if result['success'] and result['transcript']:
-                start_min, start_sec = divmod(result['start_time'], 60)
-                end_min, end_sec = divmod(result['end_time'], 60)
-                timestamp = f"[{start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d}]"
-                
-                successful_transcripts.append(f"{timestamp}\n{result['transcript']}")
-            else:
-                failed_chunks.append(result['chunk_id'] + 1)
-        
-        if not successful_transcripts:
-            st.error("All chunks failed to transcribe")
-            return None
-        
-        if failed_chunks:
-            st.warning(f"Chunks {failed_chunks} failed, but continuing with successful chunks")
-        
-        combined_transcript = "\n\n".join(successful_transcripts)
-        
-        st.success(f"Successfully combined {len(successful_transcripts)} chunks into final transcript")
-        return combined_transcript
-
-# ==================== LLM TEXT CHUNKER ====================
-
-class LLMTextChunker:
-    """Handles chunking of long transcripts for LLM processing"""
-    
-    def __init__(self, max_chunk_length: int = 8000, overlap_length: int = 200):
-        self.max_chunk_length = max_chunk_length
-        self.overlap_length = overlap_length
-        self.min_chunk_length = 1000
-        
-    def estimate_tokens(self, text: str) -> int:
-        """Rough token estimation"""
-        return len(text) // 4
-    
-    def should_chunk_text(self, text: str) -> bool:
-        """Determine if text needs chunking"""
-        estimated_tokens = self.estimate_tokens(text)
-        return estimated_tokens > 6000
-    
-    def find_split_points(self, text: str) -> List[int]:
-        """Find intelligent split points in text"""
-        split_points = []
-        
-        for match in re.finditer(r'\n\s*\n', text):
-            split_points.append(match.end())
-        
-        sentence_endings = r'[.!?]\s+'
-        for match in re.finditer(sentence_endings, text):
-            split_points.append(match.end())
-        
-        for match in re.finditer(r'\n', text):
-            split_points.append(match.end())
-        
-        split_points = sorted(list(set(split_points)))
-        
-        return split_points
-    
-    def create_intelligent_chunks(self, text: str) -> List[Dict[str, Any]]:
-        """Create overlapping chunks with intelligent splitting"""
-        if not self.should_chunk_text(text):
-            return [{
-                'chunk_id': 0,
-                'start_pos': 0,
-                'end_pos': len(text),
-                'text': text,
-                'tokens_estimate': self.estimate_tokens(text),
-                'is_single_chunk': True
-            }]
-        
-        st.info(f"Text is {len(text):,} characters (~{self.estimate_tokens(text):,} tokens) - chunking for better LLM processing...")
-        
-        chunks = []
-        split_points = self.find_split_points(text)
-        
-        current_start = 0
-        chunk_id = 0
-        
-        while current_start < len(text):
-            target_end = current_start + self.max_chunk_length
-            
-            if target_end >= len(text):
-                chunk_text = text[current_start:]
-                chunks.append({
-                    'chunk_id': chunk_id,
-                    'start_pos': current_start,
-                    'end_pos': len(text),
-                    'text': chunk_text,
-                    'tokens_estimate': self.estimate_tokens(chunk_text),
-                    'is_final_chunk': True
-                })
-                break
-            
-            best_split = target_end
-            for split_point in reversed(split_points):
-                if current_start + self.min_chunk_length <= split_point <= target_end:
-                    best_split = split_point
-                    break
-            
-            chunk_text = text[current_start:best_split]
-            chunks.append({
-                'chunk_id': chunk_id,
-                'start_pos': current_start,
-                'end_pos': best_split,
-                'text': chunk_text,
-                'tokens_estimate': self.estimate_tokens(chunk_text),
-                'is_final_chunk': False
-            })
-            
-            next_start = max(current_start + self.min_chunk_length, best_split - self.overlap_length)
-            current_start = next_start
-            chunk_id += 1
-        
-        st.info(f"Created {len(chunks)} intelligent chunks with overlap for context preservation")
-        return chunks
-
-# ==================== PROVIDER LAYER ====================
-
-class TranscriptProvider:
-    """Base class for transcript providers"""
-    def get_transcript(self, url: str, language: str) -> Optional[str]:
-        raise NotImplementedError
-
-class SupadataTranscriptProvider(TranscriptProvider):
-    def __init__(self, api_key: str):
-        try:
-            from supadata import Supadata, SupadataError
-            self.client = Supadata(api_key=api_key)
-            self.available = True
-        except ImportError:
-            self.available = False
-            self.client = None
-    
-    def get_transcript(self, url: str, language: str) -> Optional[str]:
-        if not self.available or not self.client:
-            st.warning("Supadata client not available")
-            return None
-        
-        language_map = {
-            "English": "en",
-            "中文": "zh",
-            "zh": "zh",
-            "en": "en"
-        }
-        
-        supadata_lang = language_map.get(language, "en")
-        
-        try:
-            resp = self.client.transcript(url=url, lang=supadata_lang, text=True, mode="auto")
-            return self._normalize_transcript(resp)
-        except Exception as e:
-            st.error(f"Supadata error: {e}")
-            return None
-    
-    def _normalize_transcript(self, resp) -> str:
-        """Convert various Supadata transcript response shapes to plain text"""
-        if resp is None:
-            return ""
-        
-        resp_str = str(resp)
-        if "BatchJob" in resp_str or "job_id" in resp_str:
-            st.warning("Supadata returned a BatchJob - transcript may be processing or unavailable")
-            return ""
-
-        if isinstance(resp, str):
-            if "BatchJob" in resp or "job_id" in resp:
-                return ""
-            return resp
-
-        if isinstance(resp, dict):
-            if resp.get("status") == "processing" or resp.get("job_id"):
-                st.warning("Transcript is still processing")
-                return ""
-            
-            t = resp.get("text")
-            if isinstance(t, str):
-                return t
-
-            chunks = resp.get("chunks")
-            if isinstance(chunks, list):
-                parts = []
-                for ch in chunks:
-                    if isinstance(ch, str):
-                        parts.append(ch)
-                    elif isinstance(ch, dict):
-                        v = ch.get("text") or ch.get("content")
-                        if isinstance(v, str):
-                            parts.append(v)
-                    else:
-                        v = getattr(ch, "text", None)
-                        if isinstance(v, str):
-                            parts.append(v)
-                return "\n".join(parts)
-
-        if isinstance(resp, list):
-            parts = []
-            for ch in resp:
-                if isinstance(ch, str):
-                    parts.append(ch)
-                elif isinstance(ch, dict):
-                    v = ch.get("text") or ch.get("content")
-                    if isinstance(v, str):
-                        parts.append(v)
-                else:
-                    v = getattr(ch, "text", None)
-                    if isinstance(v, str):
-                        parts.append(v)
-            return "\n".join(parts)
-
-        v = getattr(resp, "text", None)
-        if isinstance(v, str):
-            return v
-
-        try:
-            result_str = str(resp)
-            if "BatchJob" not in result_str and "job_id" not in result_str:
-                return result_str
-            return ""
-        except Exception:
-            return ""
-
-class YouTubeAudioExtractor:
-    """Helper class to extract audio URLs from YouTube videos"""
-    
-    def __init__(self):
-        self.cookie_manager = YouTubeCookieManager()
-    
-    def extract_audio_url(self, youtube_url: str, browser: str = 'chrome') -> Optional[str]:
-        """Extract direct audio URL from YouTube video"""
-        try:
-            import yt_dlp
-            
-            st.info(f"Extracting audio stream URL using yt-dlp...")
-            
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'noplaylist': True,
-                'quiet': True,
-                'no_warnings': True,
-                'headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                }
-            }
-            
-            render_cookies = '/etc/secrets/youtube_cookies.txt'
-            cookies_file = None
-            
-            if os.path.exists(render_cookies):
-                st.success(f"Found Render secret cookies file!")
-                cookies_file = render_cookies
-            else:
-                env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
-                if env_cookies and os.path.exists(env_cookies):
-                    st.info(f"Using cookies file from environment variable")
-                    cookies_file = env_cookies
-            
-            if cookies_file:
-                ydl_opts['cookiefile'] = cookies_file
-                st.info(f"Using cookies for authentication")
-            else:
-                st.warning("No cookies file found - attempting without authentication")
-            
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(youtube_url, download=False)
-                    
-                    if info:
-                        formats = info.get('formats', [])
-                        
-                        audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                        
-                        if audio_formats:
-                            audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
-                            best_audio = audio_formats[0]
-                            st.success(f"Found audio-only stream: {best_audio.get('format_note', 'unknown quality')}")
-                            return best_audio.get('url')
-                        
-                        formats_with_audio = [f for f in formats if f.get('acodec') != 'none']
-                        
-                        if formats_with_audio:
-                            formats_with_audio.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
-                            best_format = formats_with_audio[0]
-                            st.success(f"Found audio stream: {best_format.get('format_note', 'unknown quality')}")
-                            return best_format.get('url')
-                    
-                    st.error("No audio formats found in video")
-                    return None
-            
-            except Exception as e:
-                error_msg = str(e)
-                if "Sign in to confirm" in error_msg:
-                    st.error("YouTube requires authentication - cookies may be expired or invalid")
-                    st.info("Please update your youtube_cookies.txt file")
-                elif "Video unavailable" in error_msg:
-                    st.error("Video is unavailable or private")
-                else:
-                    st.error(f"Error extracting audio: {error_msg}")
-                return None
-                
-        except ImportError:
-            st.error("yt-dlp not installed. Install with: pip install yt-dlp")
-            return None
-        except Exception as e:
-            st.error(f"Audio extraction error: {e}")
-            return None
-
-class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
-    """ASR provider with chunking support"""
-    def __init__(self, api_key: str, browser: str = 'chrome'):
-        self.api_key = api_key
-        self.base_url = "https://api.assemblyai.com/v2"
-        self.audio_extractor = YouTubeAudioExtractor()
-        self.chunker = AudioChunker()
-        self.max_duration_minutes = 60
-        self.browser = browser
-    
-    def get_transcript(self, url: str, language: str) -> Optional[str]:
-        if not self.api_key:
-            st.warning("AssemblyAI API key not provided")
-            return None
-        
-        duration = self.chunker.get_video_duration(url, self.browser)
-        
-        if duration and duration > (self.max_duration_minutes * 60):
-            st.info(f"Long video detected ({duration//60}m {duration%60}s) - using chunked transcription")
-            return self._transcribe_with_chunking(url, language)
-        else:
-            st.info(f"Standard transcription for video ({duration//60 if duration else 'unknown'}m)")
-            return self._transcribe_standard(url, language)
-    
-    def _transcribe_standard(self, url: str, language: str) -> Optional[str]:
-        """Standard transcription without chunking"""
-        st.info("Step 1: Extracting audio URL from YouTube video...")
-        audio_url = self.audio_extractor.extract_audio_url(url, self.browser)
-        
-        if not audio_url:
-            st.error("Cannot extract audio URL from YouTube video. ASR fallback failed.")
-            return None
-        
-        st.info("Step 2: Starting AssemblyAI transcription...")
-        return self._transcribe_audio_url(audio_url, language)
-    
-    def _transcribe_with_chunking(self, url: str, language: str) -> Optional[str]:
-        """Transcription with chunking for long videos"""
-        st.info("Step 1: Preparing video chunks...")
-        chunks = self.chunker.extract_chunked_audio_urls(url, self.browser)
-        
-        if not chunks:
-            st.warning("Could not create chunks, falling back to standard transcription")
-            return self._transcribe_standard(url, language)
-        
-        st.info("Step 2: Starting parallel chunk transcription...")
-        return self.chunker.transcribe_chunks_parallel(chunks, self, language)
-    
-    def _transcribe_audio_url(self, audio_url: str, language: str) -> Optional[str]:
-        """Transcribe using a direct audio URL"""
-        try:
-            headers = {
-                "authorization": self.api_key,
-                "content-type": "application/json"
-            }
-            
-            language_map = {
-                "English": "en",
-                "中文": "zh",
-                "en": "en",
-                "zh": "zh"
-            }
-            
-            assemblyai_lang = language_map.get(language, "en")
-            
-            data = {
-                "audio_url": audio_url,
-                "language_code": assemblyai_lang,
-                "speech_model": "best"
-            }
-            
-            st.info("Submitting transcription request to AssemblyAI...")
-            response = requests.post(
-                f"{self.base_url}/transcript",
-                json=data,
-                headers=headers,
-                timeout=30
-            )
-            
-            if response.status_code != 200:
-                error_data = response.json()
-                error_msg = error_data.get('error', 'Unknown error')
-                st.error(f"AssemblyAI submission error ({response.status_code}): {error_msg}")
-                return None
-                
-            transcript_id = response.json()['id']
-            st.success(f"Transcription submitted with ID: {transcript_id}")
-            
-            return self._poll_for_completion(transcript_id, headers)
-            
-        except Exception as e:
-            st.error(f"AssemblyAI transcription error: {e}")
-            return None
-    
-    def _poll_for_completion(self, transcript_id: str, headers: dict) -> Optional[str]:
-        """Poll AssemblyAI for transcription completion"""
-        polling_endpoint = f"{self.base_url}/transcript/{transcript_id}"
-        max_attempts = 120
-        attempt = 0
-        
-        st.info("Polling for transcription completion...")
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        while attempt < max_attempts:
-            try:
-                polling_response = requests.get(polling_endpoint, headers=headers, timeout=30)
-                
-                if polling_response.status_code != 200:
-                    st.error(f"Polling error ({polling_response.status_code})")
-                    return None
-                
-                polling_data = polling_response.json()
-                status = polling_data.get('status', 'unknown')
-                
-                status_text.text(f"Status: {status} (attempt {attempt + 1}/{max_attempts})")
-                progress_bar.progress((attempt + 1) / max_attempts)
-                
-                if status == 'completed':
-                    status_text.text("Transcription completed successfully!")
-                    progress_bar.progress(1.0)
-                    
-                    transcript_text = polling_data.get('text', '')
-                    if transcript_text:
-                        st.success
+diff --git a/app.py b/app.py
+index d4592febfdefff26f4d291db45a83f887a04e6c3..c9d19ca0b71d643fdc3b252d7b461476b5315024 100644
+--- a/app.py
++++ b/app.py
+@@ -1,42 +1,46 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ """
+ YouTube Transcript Processor with Executive Summary and Persistent Data
+ Complete application with all improvements implemented
+ """
+ 
+ import os
+ import re
+-import json
+ import time
++import heapq
+ import hashlib
+ import pickle
+ import concurrent.futures
+-from datetime import datetime, timedelta
++from dataclasses import dataclass, field
++from datetime import datetime
+ from pathlib import Path
+-from typing import Optional, List, Dict, Tuple, Any
++from textwrap import shorten
++from typing import Optional, List, Dict, Any, Tuple
++from urllib.parse import urlparse, parse_qs
++
+ import requests
+ import streamlit as st
+ 
+ # ==================== PERSISTENCE LAYER ====================
+ 
+ class UserDataManager:
+     """Manages user settings and history persistence"""
+     
+     def __init__(self, username: str):
+         self.username = username
+         self.data_dir = Path("user_data")
+         self.data_dir.mkdir(exist_ok=True)
+         self.user_file = self.data_dir / f"{username}_data.pkl"
+         self.load_data()
+     
+     def load_data(self):
+         """Load user data from file"""
+         if self.user_file.exists():
+             try:
+                 with open(self.user_file, 'rb') as f:
+                     self.data = pickle.load(f)
+             except:
+                 self.data = self.get_default_data()
+         else:
+             self.data = self.get_default_data()
+diff --git a/app.py b/app.py
+index d4592febfdefff26f4d291db45a83f887a04e6c3..c9d19ca0b71d643fdc3b252d7b461476b5315024 100644
+--- a/app.py
++++ b/app.py
+@@ -728,43 +732,806 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
+                 return None
+                 
+             transcript_id = response.json()['id']
+             st.success(f"Transcription submitted with ID: {transcript_id}")
+             
+             return self._poll_for_completion(transcript_id, headers)
+             
+         except Exception as e:
+             st.error(f"AssemblyAI transcription error: {e}")
+             return None
+     
+     def _poll_for_completion(self, transcript_id: str, headers: dict) -> Optional[str]:
+         """Poll AssemblyAI for transcription completion"""
+         polling_endpoint = f"{self.base_url}/transcript/{transcript_id}"
+         max_attempts = 120
+         attempt = 0
+         
+         st.info("Polling for transcription completion...")
+         
+         progress_bar = st.progress(0)
+         status_text = st.empty()
+         
+         while attempt < max_attempts:
+             try:
+                 polling_response = requests.get(polling_endpoint, headers=headers, timeout=30)
+-                
++
+                 if polling_response.status_code != 200:
+                     st.error(f"Polling error ({polling_response.status_code})")
+                     return None
+-                
++
+                 polling_data = polling_response.json()
+                 status = polling_data.get('status', 'unknown')
+-                
++
+                 status_text.text(f"Status: {status} (attempt {attempt + 1}/{max_attempts})")
+                 progress_bar.progress((attempt + 1) / max_attempts)
+-                
++
+                 if status == 'completed':
+                     status_text.text("Transcription completed successfully!")
+                     progress_bar.progress(1.0)
+-                    
++
+                     transcript_text = polling_data.get('text', '')
+                     if transcript_text:
+-                        st.success
++                        st.success("AssemblyAI returned a transcript")
++                        return transcript_text
++
++                    st.warning("AssemblyAI completed without returning transcript text")
++                    return ""
++
++                if status == 'error':
++                    error_msg = polling_data.get('error', 'Unknown error')
++                    st.error(f"AssemblyAI reported an error: {error_msg}")
++                    return None
++
++                attempt += 1
++                if attempt < max_attempts:
++                    time.sleep(5)
++                continue
++
++            except requests.RequestException as exc:
++                attempt += 1
++                wait_time = min(5 + attempt // 2, 15)
++                st.warning(f"Polling request failed ({exc}). Retrying in {wait_time} seconds...")
++                time.sleep(wait_time)
++            except Exception as exc:
++                st.error(f"Unexpected polling error: {exc}")
++                return None
++
++        st.error("Timed out waiting for AssemblyAI transcription to complete")
++        return None
++
++# ==================== PROCESSING AND ANALYSIS LAYER ====================
++
++
++class ExecutiveSummaryGenerator:
++    """Generates heuristic summaries and statistics for transcripts."""
++
++    SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
++    WORD_RE = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ']+")
++    STOPWORDS = {
++        "the",
++        "and",
++        "that",
++        "with",
++        "this",
++        "from",
++        "have",
++        "your",
++        "will",
++        "they",
++        "been",
++        "their",
++        "about",
++        "there",
++        "which",
++        "into",
++        "would",
++        "could",
++        "should",
++        "while",
++        "where",
++        "these",
++        "those",
++        "when",
++        "what",
++        "here",
++        "over",
++        "also",
++        "such",
++        "than",
++        "then",
++        "because",
++        "after",
++        "before",
++        "being",
++        "doing",
++        "does",
++        "done",
++        "ourselves",
++        "yourself",
++        "myself",
++        "ours",
++        "yours",
++        "them",
++        "they're",
++        "we're",
++        "he's",
++        "she's",
++        "it's",
++    }
++
++    def __init__(self, chunker: Optional[LLMTextChunker] = None):
++        self.chunker = chunker
++
++    def _split_sentences(self, text: str) -> List[str]:
++        sentences = [s.strip() for s in self.SENTENCE_SPLIT_RE.split(text) if s.strip()]
++        if not sentences and text.strip():
++            sentences = [text.strip()]
++        return sentences
++
++    def _tokenize_words(self, text: str) -> List[str]:
++        return [match.lower() for match in self.WORD_RE.findall(text)]
++
++    def _compute_word_frequencies(self, words: List[str]) -> Dict[str, float]:
++        frequencies: Dict[str, float] = {}
++        for word in words:
++            if len(word) <= 2 or word in self.STOPWORDS:
++                continue
++            frequencies[word] = frequencies.get(word, 0.0) + 1.0
++
++        if frequencies:
++            max_freq = max(frequencies.values())
++            if max_freq:
++                for key in list(frequencies.keys()):
++                    frequencies[key] /= max_freq
++
++        return frequencies
++
++    def _score_sentences(self, sentences: List[str], frequencies: Dict[str, float]) -> List[Tuple[int, float, str]]:
++        scored: List[Tuple[int, float, str]] = []
++        for idx, sentence in enumerate(sentences):
++            words = self.WORD_RE.findall(sentence)
++            if not words:
++                continue
++            score = sum(frequencies.get(word.lower(), 0.0) for word in words)
++            normalized = score / max(len(words), 1)
++            if normalized > 0:
++                scored.append((idx, normalized, sentence.strip()))
++        return scored
++
++    def _select_sentences(self, scored: List[Tuple[int, float, str]], limit: int) -> List[str]:
++        if not scored:
++            return []
++
++        top_scored = heapq.nlargest(limit, scored, key=lambda item: item[1])
++        top_scored.sort(key=lambda item: item[0])
++        return [sentence for _, _, sentence in top_scored]
++
++    def _build_stats(self, text: str, sentences: List[str], words: List[str]) -> Dict[str, Any]:
++        unique_words = len(set(words))
++        word_count = len(words)
++        reading_time_minutes = word_count / 200 if word_count else 0
++        speaking_time_minutes = word_count / 130 if word_count else 0
++
++        return {
++            "characters": len(text),
++            "words": word_count,
++            "sentences": len(sentences),
++            "unique_words": unique_words,
++            "estimated_reading_minutes": round(reading_time_minutes, 2),
++            "estimated_speaking_minutes": round(speaking_time_minutes, 2),
++        }
++
++    def _chunk_metadata(self, text: str) -> List[Dict[str, Any]]:
++        if not self.chunker:
++            return []
++
++        chunk_data: List[Dict[str, Any]] = []
++        for chunk in self.chunker.create_intelligent_chunks(text):
++            preview_source = re.sub(r"\s+", " ", chunk.get('text', '').strip())
++            preview = shorten(preview_source, width=160, placeholder="…")
++            chunk_data.append(
++                {
++                    "chunk_id": chunk.get('chunk_id', 0),
++                    "tokens_estimate": chunk.get('tokens_estimate', 0),
++                    "is_final": chunk.get('is_final_chunk', chunk.get('is_single_chunk', False)),
++                    "preview": preview,
++                }
++            )
++        return chunk_data
++
++    def analyze(self, text: str) -> Dict[str, Any]:
++        cleaned = text.strip()
++        if not cleaned:
++            return {
++                "summary": "",
++                "key_points": [],
++                "keywords": [],
++                "stats": {
++                    "characters": 0,
++                    "words": 0,
++                    "sentences": 0,
++                    "unique_words": 0,
++                    "estimated_reading_minutes": 0,
++                    "estimated_speaking_minutes": 0,
++                },
++                "chunks": [],
++            }
++
++        sentences = self._split_sentences(cleaned)
++        words = self._tokenize_words(cleaned)
++        frequencies = self._compute_word_frequencies(words)
++        scored_sentences = self._score_sentences(sentences, frequencies)
++
++        summary_sentences = self._select_sentences(scored_sentences, limit=5)
++        key_point_sentences = self._select_sentences(scored_sentences, limit=8)
++
++        keywords = [word for word, _ in sorted(frequencies.items(), key=lambda item: item[1], reverse=True)[:10]]
++
++        stats = self._build_stats(cleaned, sentences, words)
++        chunk_data = self._chunk_metadata(cleaned)
++
++        return {
++            "summary": " ".join(summary_sentences),
++            "key_points": key_point_sentences,
++            "keywords": keywords,
++            "stats": stats,
++            "chunks": chunk_data,
++        }
++
++
++@dataclass
++class TranscriptProcessingResult:
++    """Represents the outcome of a transcript retrieval attempt."""
++
++    transcript: str
++    provider: str
++    used_fallback: bool
++    fetch_duration: float
++    attempted_providers: List[str] = field(default_factory=list)
++    errors: List[str] = field(default_factory=list)
++    warnings: List[str] = field(default_factory=list)
++    cached: bool = False
++
++
++class TranscriptProcessingManager:
++    """Coordinates transcript retrieval and summary analysis."""
++
++    def __init__(self):
++        self.chunker = LLMTextChunker()
++        self.summary_generator = ExecutiveSummaryGenerator(self.chunker)
++        self._cache: Dict[str, TranscriptProcessingResult] = {}
++
++    @staticmethod
++    def _cache_key(url: str, language: str) -> str:
++        cache_input = f"{url}|{language}".encode("utf-8", errors="ignore")
++        return hashlib.sha256(cache_input).hexdigest()
++
++    def fetch_transcript(
++        self,
++        youtube_url: str,
++        language: str,
++        api_keys: Dict[str, str],
++        use_asr_fallback: bool,
++        browser: str,
++    ) -> TranscriptProcessingResult:
++        """Fetch transcript using available providers with optional fallback."""
++
++        cache_key = self._cache_key(youtube_url, language)
++        if cache_key in self._cache:
++            cached = self._cache[cache_key]
++            return TranscriptProcessingResult(
++                transcript=cached.transcript,
++                provider=cached.provider,
++                used_fallback=cached.used_fallback,
++                fetch_duration=0.0,
++                attempted_providers=list(cached.attempted_providers),
++                errors=list(cached.errors),
++                warnings=list(cached.warnings),
++                cached=True,
++            )
++
++        start_time = time.time()
++        transcript_text = ""
++        provider_used = ""
++        attempted: List[str] = []
++        errors: List[str] = []
++        warnings: List[str] = []
++
++        supadata_key = (api_keys or {}).get("supadata", "").strip()
++        assembly_key = (api_keys or {}).get("assemblyai", "").strip()
++
++        if supadata_key:
++            attempted.append("Supadata")
++            provider = SupadataTranscriptProvider(supadata_key)
++            transcript_text = provider.get_transcript(youtube_url, language) or ""
++            if transcript_text:
++                provider_used = "Supadata"
++            else:
++                warnings.append("Supadata transcript unavailable for this video")
++        else:
++            warnings.append("Supadata API key not provided")
++
++        used_fallback = False
++
++        if not transcript_text:
++            if use_asr_fallback:
++                if assembly_key:
++                    attempted.append("AssemblyAI")
++                    provider = ImprovedAssemblyAITranscriptProvider(assembly_key, browser)
++                    transcript_text = provider.get_transcript(youtube_url, language) or ""
++                    if transcript_text:
++                        provider_used = "AssemblyAI"
++                        used_fallback = True
++                    else:
++                        errors.append("AssemblyAI fallback did not return a transcript")
++                else:
++                    warnings.append("AssemblyAI API key not provided for fallback transcription")
++            else:
++                warnings.append("ASR fallback disabled and no transcript available from Supadata")
++
++        fetch_duration = time.time() - start_time
++
++        if not transcript_text:
++            errors.append("No transcript could be retrieved for the supplied video")
++
++        result = TranscriptProcessingResult(
++            transcript=transcript_text,
++            provider=provider_used or "Unavailable",
++            used_fallback=used_fallback,
++            fetch_duration=fetch_duration,
++            attempted_providers=attempted,
++            errors=errors,
++            warnings=warnings,
++        )
++
++        if transcript_text:
++            self._cache[cache_key] = result
++
++        return result
++
++
++# ==================== STREAMLIT UTILITIES ====================
++
++
++def is_streamlit_running() -> bool:
++    """Detect whether the script is executed within a Streamlit runtime."""
++
++    try:
++        from streamlit.runtime.scriptrunner import get_script_run_ctx
++
++        return get_script_run_ctx() is not None
++    except Exception:
++        return False
++
++
++def extract_video_id(youtube_url: str) -> Optional[str]:
++    """Extract the YouTube video identifier from the provided URL."""
++
++    try:
++        parsed = urlparse(youtube_url)
++    except Exception:
++        return None
++
++    hostname = parsed.netloc.lower()
++
++    if hostname.endswith("youtu.be"):
++        return parsed.path.lstrip("/") or None
++
++    if "youtube.com" in hostname:
++        if parsed.path.startswith("/shorts/"):
++            return parsed.path.split("/shorts/")[-1] or None
++        params = parse_qs(parsed.query)
++        if "v" in params:
++            return params["v"][0]
++
++    return None
++
++
++def validate_youtube_url(youtube_url: str) -> bool:
++    """Basic validation to ensure the URL appears to be a YouTube link."""
++
++    if not youtube_url:
++        return False
++
++    try:
++        parsed = urlparse(youtube_url)
++    except Exception:
++        return False
++
++    hostname = parsed.netloc.lower()
++    return any(domain in hostname for domain in ("youtube.com", "youtu.be"))
++
++
++def ensure_session_defaults() -> None:
++    """Initialize Streamlit session state with expected keys."""
++
++    defaults = {
++        "authenticated": False,
++        "username": None,
++        "api_keys": {},
++        "user_data_manager": None,
++        "processing_result": None,
++        "analysis": None,
++    }
++
++    for key, value in defaults.items():
++        if key not in st.session_state:
++            st.session_state[key] = value
++
++
++def sync_settings_from_storage(user_data_manager: UserDataManager) -> None:
++    """Ensure stored settings populate the current Streamlit session."""
++
++    settings = user_data_manager.get_settings()
++    defaults = {
++        "language": "English",
++        "use_asr_fallback": True,
++        "browser_for_cookies": "none",
++        "deepseek_model": "deepseek-chat",
++        "temperature": 0.1,
++        "system_prompt": None,
++    }
++
++    for key, fallback in defaults.items():
++        session_key = f"settings_{key}"
++        if session_key not in st.session_state:
++            st.session_state[session_key] = settings.get(key, fallback)
++
++
++def update_user_settings(user_data_manager: UserDataManager) -> None:
++    updated_settings = {
++        "language": st.session_state.get("settings_language", "English"),
++        "use_asr_fallback": st.session_state.get("settings_use_asr_fallback", True),
++        "browser_for_cookies": st.session_state.get("settings_browser_for_cookies", "none"),
++        "deepseek_model": st.session_state.get("settings_deepseek_model", "deepseek-chat"),
++        "temperature": st.session_state.get("settings_temperature", 0.1),
++        "system_prompt": st.session_state.get("settings_system_prompt"),
++    }
++    user_data_manager.update_settings(updated_settings)
++
++
++def render_sidebar(user_data_manager: UserDataManager) -> None:
++    """Render sidebar controls for settings and API key management."""
++
++    sync_settings_from_storage(user_data_manager)
++
++    st.sidebar.header("Processing Settings")
++    st.sidebar.selectbox(
++        "Transcript language",
++        options=["English", "中文"],
++        key="settings_language",
++    )
++    st.sidebar.checkbox(
++        "Enable AssemblyAI fallback", key="settings_use_asr_fallback"
++    )
++    st.sidebar.selectbox(
++        "Browser for YouTube cookies",
++        options=["none", "chrome", "firefox", "edge"],
++        key="settings_browser_for_cookies",
++    )
++
++    with st.sidebar.expander("Advanced LLM settings", expanded=False):
++        st.text_input(
++            "Preferred DeepSeek model",
++            key="settings_deepseek_model",
++        )
++        st.slider(
++            "LLM temperature",
++            min_value=0.0,
++            max_value=1.0,
++            value=float(st.session_state.get("settings_temperature", 0.1)),
++            key="settings_temperature",
++        )
++        st.text_area(
++            "Custom system prompt",
++            key="settings_system_prompt",
++            height=120,
++        )
++
++    if st.sidebar.button("Save settings", key="save_settings_button"):
++        update_user_settings(user_data_manager)
++        st.sidebar.success("Settings saved")
++
++    stored_keys = user_data_manager.data.get("api_keys", {})
++    current_keys = {**stored_keys, **st.session_state.get("api_keys", {})}
++
++    with st.sidebar.expander("API keys", expanded=False):
++        supadata_key = st.text_input(
++            "Supadata API key",
++            value=current_keys.get("supadata", ""),
++            type="password",
++        )
++        assembly_key = st.text_input(
++            "AssemblyAI API key",
++            value=current_keys.get("assemblyai", ""),
++            type="password",
++        )
++        deepseek_key = st.text_input(
++            "DeepSeek API key",
++            value=current_keys.get("deepseek", ""),
++            type="password",
++        )
++        youtube_key = st.text_input(
++            "YouTube API key",
++            value=current_keys.get("youtube", ""),
++            type="password",
++        )
++
++        if st.button("Save API keys", key="save_api_keys_button"):
++            user_data_manager.data.setdefault("api_keys", {})
++            user_data_manager.data["api_keys"].update(
++                {
++                    "supadata": supadata_key.strip(),
++                    "assemblyai": assembly_key.strip(),
++                    "deepseek": deepseek_key.strip(),
++                    "youtube": youtube_key.strip(),
++                }
++            )
++            user_data_manager.save_data()
++            st.session_state["api_keys"] = user_data_manager.data.get("api_keys", {})
++            st.sidebar.success("API keys updated")
++
++
++def handle_authentication(auth_manager: AuthManager) -> bool:
++    """Render authentication controls and update session state."""
++
++    ensure_session_defaults()
++
++    if not st.session_state["authenticated"]:
++        st.sidebar.header("Sign in")
++        with st.sidebar.form("login_form"):
++            username = st.text_input("Username", key="login_username")
++            password = st.text_input(
++                "Password", type="password", key="login_password"
++            )
++            submitted = st.form_submit_button("Log in")
++
++        if submitted:
++            if auth_manager.authenticate(username, password):
++                st.session_state["authenticated"] = True
++                st.session_state["username"] = username
++
++                user_data_manager = UserDataManager(username)
++                st.session_state["user_data_manager"] = user_data_manager
++
++                stored_keys = auth_manager.get_user_api_keys(username)
++                combined_keys = {
++                    **stored_keys,
++                    **user_data_manager.data.get("api_keys", {}),
++                }
++                st.session_state["api_keys"] = combined_keys
++
++                st.sidebar.success("Login successful")
++                st.experimental_rerun()
++            else:
++                st.sidebar.error("Invalid username or password")
++
++        return False
++
++    st.sidebar.caption(f"Signed in as {st.session_state['username']}")
++    if st.sidebar.button("Log out", key="logout_button"):
++        st.session_state["authenticated"] = False
++        st.session_state["username"] = None
++        st.session_state["api_keys"] = {}
++        st.session_state["user_data_manager"] = None
++        st.session_state["processing_result"] = None
++        st.session_state["analysis"] = None
++        st.experimental_rerun()
++
++    return True
++
++
++def add_history_entry(
++    user_data_manager: UserDataManager,
++    youtube_url: str,
++    result: TranscriptProcessingResult,
++    analysis: Optional[Dict[str, Any]],
++    language: str,
++) -> None:
++    """Persist the latest processing result to the user's history."""
++
++    video_id = extract_video_id(youtube_url)
++    summary_preview = ""
++    if analysis and analysis.get("summary"):
++        summary_preview = shorten(analysis["summary"], width=160, placeholder="…")
++
++    history_entry = {
++        "timestamp": datetime.utcnow().isoformat(timespec="seconds"),
++        "url": youtube_url,
++        "video_id": video_id,
++        "provider": result.provider,
++        "language": language,
++        "summary": summary_preview,
++        "keywords": (analysis or {}).get("keywords", [])[:5],
++    }
++
++    user_data_manager.add_to_history(history_entry)
++
++
++def render_history(user_data_manager: UserDataManager) -> None:
++    """Display the user's recent processing history."""
++
++    st.subheader("Recent activity")
++    history = user_data_manager.get_history()
++
++    if not history:
++        st.info("No history recorded yet. Process a video to see entries here.")
++        return
++
++    for entry in history[:10]:
++        label = entry.get("timestamp", "Unknown time")
++        title = entry.get("summary") or entry.get("url") or "Previous result"
++        with st.expander(f"{label} — {title}"):
++            st.markdown(f"**Video URL:** {entry.get('url', 'Unknown')}")
++            if entry.get("video_id"):
++                st.markdown(f"**Video ID:** `{entry['video_id']}`")
++            st.markdown(f"**Provider:** {entry.get('provider', 'Unknown')}")
++            st.markdown(f"**Language:** {entry.get('language', 'Unknown')}")
++            keywords = entry.get("keywords", [])
++            if keywords:
++                st.markdown("**Keywords:** " + ", ".join(keywords))
++
++
++def render_processing_interface(
++    user_data_manager: UserDataManager, processor: TranscriptProcessingManager
++) -> None:
++    """Render the main interface for processing YouTube transcripts."""
++
++    st.header("YouTube Transcript Processor")
++    st.write(
++        "Provide a YouTube video URL to retrieve its transcript and generate an executive summary."
++    )
++
++    youtube_url = st.text_input(
++        "YouTube video URL",
++        key="youtube_input",
++        placeholder="https://www.youtube.com/watch?v=...",
++    )
++
++    language = st.session_state.get("settings_language", "English")
++    use_asr_fallback = st.session_state.get("settings_use_asr_fallback", True)
++    browser = st.session_state.get("settings_browser_for_cookies", "none")
++
++    if st.button("Process video", key="process_video_button"):
++        if not validate_youtube_url(youtube_url):
++            st.error("Please provide a valid YouTube URL")
++        else:
++            with st.spinner("Fetching transcript..."):
++                result = processor.fetch_transcript(
++                    youtube_url=youtube_url,
++                    language=language,
++                    api_keys=st.session_state.get("api_keys", {}),
++                    use_asr_fallback=use_asr_fallback,
++                    browser=browser,
++                )
++
++            st.session_state["processing_result"] = result
++
++            if result.transcript:
++                analysis = processor.summary_generator.analyze(result.transcript)
++                st.session_state["analysis"] = analysis
++                add_history_entry(user_data_manager, youtube_url, result, analysis, language)
++            else:
++                st.session_state["analysis"] = None
++
++    result: Optional[TranscriptProcessingResult] = st.session_state.get("processing_result")
++    analysis: Optional[Dict[str, Any]] = st.session_state.get("analysis")
++
++    if not result:
++        return
++
++    st.subheader("Processing details")
++    columns = st.columns(4)
++    columns[0].metric("Provider", result.provider or "None")
++    columns[1].metric("Used fallback", "Yes" if result.used_fallback else "No")
++    columns[2].metric(
++        "Fetch duration",
++        f"{result.fetch_duration:.1f}s" if not result.cached else "0.0s (cached)",
++    )
++    columns[3].metric(
++        "Transcript length",
++        f"{len(result.transcript.split()):,} words" if result.transcript else "0 words",
++    )
++
++    if result.cached:
++        st.info("Using cached transcript from earlier in this session")
++
++    for warning in result.warnings:
++        if warning:
++            st.warning(warning)
++
++    for error in result.errors:
++        if error:
++            st.error(error)
++
++    if not result.transcript:
++        return
++
++    if analysis:
++        st.subheader("Executive summary")
++        summary_text = analysis.get("summary", "")
++        if summary_text:
++            st.markdown(summary_text)
++        else:
++            st.info("Summary could not be generated for this transcript")
++
++        key_points = analysis.get("key_points", [])
++        keywords = analysis.get("keywords", [])
++        stats = analysis.get("stats", {})
++
++        col_a, col_b = st.columns(2)
++        with col_a:
++            st.markdown("**Key points**")
++            if key_points:
++                for point in key_points:
++                    st.markdown(f"- {point}")
++            else:
++                st.write("No key points extracted")
++
++        with col_b:
++            st.markdown("**Keywords**")
++            if keywords:
++                st.write(", ".join(keywords))
++            else:
++                st.write("No keywords identified")
++
++        metric_cols = st.columns(4)
++        metric_cols[0].metric("Characters", f"{stats.get('characters', 0):,}")
++        metric_cols[1].metric("Words", f"{stats.get('words', 0):,}")
++        metric_cols[2].metric("Sentences", f"{stats.get('sentences', 0):,}")
++        metric_cols[3].metric(
++            "Reading time",
++            f"{stats.get('estimated_reading_minutes', 0):.2f} min",
++        )
++
++        chunk_data = analysis.get("chunks", [])
++        if chunk_data:
++            st.subheader("Suggested transcript chunks")
++            for chunk in chunk_data[:10]:
++                st.markdown(
++                    f"**Chunk {chunk.get('chunk_id', 0) + 1}** — approx. {chunk.get('tokens_estimate', 0):,} tokens"
++                )
++                st.code(chunk.get("preview", ""))
++
++    with st.expander("Full transcript", expanded=False):
++        st.text(result.transcript)
++        st.download_button(
++            "Download transcript",
++            data=result.transcript,
++            file_name="transcript.txt",
++            mime="text/plain",
++        )
++
++
++def main() -> None:
++    """Entry point for the Streamlit application."""
++
++    if not is_streamlit_running():
++        print("This application is intended to be run with 'streamlit run app.py'.")
++        return
++
++    st.set_page_config(page_title="YouTube Transcript Processor", layout="wide")
++
++    auth_manager = AuthManager()
++    authenticated = handle_authentication(auth_manager)
++
++    if not authenticated:
++        st.title("YouTube Transcript Processor")
++        st.write("Sign in using the sidebar to begin processing videos.")
++        return
++
++    user_data_manager = st.session_state.get("user_data_manager")
++    if not isinstance(user_data_manager, UserDataManager):
++        username = st.session_state.get("username") or "guest"
++        user_data_manager = UserDataManager(username)
++        st.session_state["user_data_manager"] = user_data_manager
++
++    render_sidebar(user_data_manager)
++
++    processor = TranscriptProcessingManager()
++    render_processing_interface(user_data_manager, processor)
++    render_history(user_data_manager)
++
++
++if __name__ == "__main__":
++    main()
