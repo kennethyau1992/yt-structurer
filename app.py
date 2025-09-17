@@ -11,6 +11,103 @@ import streamlit as st
 
 # ==================== PERSISTENCE LAYER ====================
 
+class YouTubeInfoExtractor:
+    """Helper class to extract YouTube video information"""
+    
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key
+        self.base_url = "https://www.googleapis.com/youtube/v3"
+    
+    def extract_video_id(self, url: str) -> Optional[str]:
+        """Extract video ID from YouTube URL"""
+        patterns = [
+            r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([^&\n?#]+)',
+            r'youtube\.com/v/([^&\n?#]+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        return None
+    
+    def get_video_info(self, url: str) -> Dict[str, str]:
+        """Get video title, description, and other metadata"""
+        video_id = self.extract_video_id(url)
+        if not video_id:
+            return {"title": "Unknown Video", "description": "", "duration": "", "channel": ""}
+        
+        # Try YouTube Data API first
+        if self.api_key:
+            api_info = self._get_info_from_api(video_id)
+            if api_info:
+                return api_info
+        
+        # Fallback to yt-dlp
+        return self._get_info_from_ytdlp(url)
+    
+    def _get_info_from_api(self, video_id: str) -> Optional[Dict[str, str]]:
+        """Get video info using YouTube Data API"""
+        try:
+            params = {
+                'part': 'snippet,contentDetails',
+                'id': video_id,
+                'key': self.api_key
+            }
+            
+            response = requests.get(
+                f"{self.base_url}/videos",
+                params=params,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('items'):
+                    item = data['items'][0]
+                    snippet = item.get('snippet', {})
+                    content_details = item.get('contentDetails', {})
+                    
+                    return {
+                        "title": snippet.get('title', 'Unknown Video'),
+                        "description": snippet.get('description', '')[:500] + "..." if len(snippet.get('description', '')) > 500 else snippet.get('description', ''),
+                        "duration": content_details.get('duration', ''),
+                        "channel": snippet.get('channelTitle', ''),
+                        "published_at": snippet.get('publishedAt', ''),
+                        "thumbnail": snippet.get('thumbnails', {}).get('medium', {}).get('url', '')
+                    }
+        except Exception as e:
+            st.warning(f"YouTube API failed: {e}")
+        
+        return None
+    
+    def _get_info_from_ytdlp(self, url: str) -> Dict[str, str]:
+        """Get video info using yt-dlp as fallback"""
+        try:
+            import yt_dlp
+            
+            ydl_opts = {
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                return {
+                    "title": info.get('title', 'Unknown Video'),
+                    "description": (info.get('description', '') or '')[:500] + "..." if len(info.get('description', '') or '') > 500 else info.get('description', ''),
+                    "duration": str(info.get('duration', '')),
+                    "channel": info.get('uploader', ''),
+                    "published_at": info.get('upload_date', ''),
+                    "thumbnail": info.get('thumbnail', '')
+                }
+        except Exception as e:
+            st.warning(f"yt-dlp info extraction failed: {e}")
+            
+        return {"title": "Unknown Video", "description": "", "duration": "", "channel": ""}
+
 class UserDataManager:
     """Manages persistent storage of user settings and history"""
     
@@ -23,6 +120,11 @@ class UserDataManager:
         """
         self.base_dir = base_dir
         self.ensure_data_directory()
+        self.youtube_extractor = None
+    
+    def set_youtube_extractor(self, youtube_api_key: str = None):
+        """Set YouTube info extractor for enhanced video metadata"""
+        self.youtube_extractor = YouTubeInfoExtractor(youtube_api_key)
     
     def ensure_data_directory(self):
         """Ensure the data directory exists"""
@@ -91,8 +193,23 @@ class UserDataManager:
         return data["settings"]
     
     def add_to_history(self, username: str, entry: Dict):
-        """Add entry to user's processing history"""
+        """Add entry to user's processing history with enhanced video info"""
         data = self.load_user_data(username)
+        
+        # Enhance entry with YouTube video information
+        if self.youtube_extractor and entry.get('url'):
+            video_info = self.youtube_extractor.get_video_info(entry['url'])
+            entry.update({
+                "video_title": video_info.get("title", entry.get("title", "Unknown Video")),
+                "video_description": video_info.get("description", ""),
+                "video_duration": video_info.get("duration", ""),
+                "video_channel": video_info.get("channel", ""),
+                "video_published": video_info.get("published_at", ""),
+                "video_thumbnail": video_info.get("thumbnail", "")
+            })
+        else:
+            # Fallback to provided title
+            entry["video_title"] = entry.get("title", "Unknown Video")
         
         # Add timestamp and unique ID
         entry["timestamp"] = datetime.now().isoformat()
@@ -110,6 +227,14 @@ class UserDataManager:
         """Get user's processing history"""
         data = self.load_user_data(username)
         return data["history"]
+    
+    def get_history_entry(self, username: str, entry_id: str) -> Optional[Dict]:
+        """Get a specific history entry by ID"""
+        history = self.get_user_history(username)
+        for entry in history:
+            if entry.get("id") == entry_id:
+                return entry
+        return None
     
     def delete_history_entry(self, username: str, entry_id: str):
         """Delete a specific history entry"""
@@ -251,6 +376,10 @@ class AuthManager:
     def get_user_data_manager(self) -> UserDataManager:
         """Get the user data manager instance"""
         return self.user_data_manager
+    
+    def initialize_user_data_manager_with_youtube(self, youtube_api_key: str = None):
+        """Initialize user data manager with YouTube API access"""
+        self.user_data_manager.set_youtube_extractor(youtube_api_key)
 
 # ==================== YOUTUBE COOKIE MANAGER ====================
 
@@ -1517,6 +1646,10 @@ def login_page():
                 st.session_state.api_keys = auth_manager.get_user_api_keys(username)
                 st.session_state.user_data_manager = auth_manager.get_user_data_manager()
                 
+                # Initialize YouTube extractor for enhanced video metadata
+                youtube_api_key = st.session_state.api_keys.get('youtube')
+                auth_manager.initialize_user_data_manager_with_youtube(youtube_api_key)
+                
                 # Load user settings
                 user_settings = st.session_state.user_data_manager.get_user_settings(username)
                 st.session_state.user_settings = user_settings
@@ -1530,8 +1663,162 @@ def login_page():
     
     return False
 
+def show_history_detail_page(entry_id: str):
+    """Display detailed view of a specific history entry"""
+    st.header("📝 Transcript Details")
+    
+    username = st.session_state.username
+    user_data_manager = st.session_state.user_data_manager
+    
+    # Get the specific entry
+    entry = user_data_manager.get_history_entry(username, entry_id)
+    
+    if not entry:
+        st.error("Entry not found!")
+        if st.button("← Back to History"):
+            st.session_state.current_page = "history"
+            st.rerun()
+        return
+    
+    # Navigation
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("← Back to History", type="secondary"):
+            st.session_state.current_page = "history"
+            st.rerun()
+    
+    # Video Information Header
+    with st.container():
+        # Video thumbnail and basic info
+        col1, col2 = st.columns([1, 3])
+        
+        with col1:
+            thumbnail_url = entry.get('video_thumbnail')
+            if thumbnail_url:
+                st.image(thumbnail_url, width=200)
+        
+        with col2:
+            st.title(entry.get('video_title', entry.get('title', 'Unknown Video')))
+            
+            # Video metadata
+            if entry.get('video_channel'):
+                st.write(f"**Channel:** {entry['video_channel']}")
+            
+            if entry.get('video_duration'):
+                st.write(f"**Duration:** {entry['video_duration']}")
+            
+            if entry.get('video_published'):
+                st.write(f"**Published:** {entry['video_published'][:10]}")
+            
+            st.write(f"**Processed:** {entry.get('timestamp', '')[:10]}")
+            st.write(f"**Language:** {entry.get('language', 'N/A')}")
+            st.write(f"**Model:** {entry.get('model_used', 'N/A')}")
+            st.write(f"**Status:** {entry.get('status', 'N/A')}")
+            st.write(f"**Processing Time:** {entry.get('processing_time', 'N/A')}")
+    
+    # Video description
+    if entry.get('video_description'):
+        with st.expander("📄 Video Description", expanded=False):
+            st.write(entry['video_description'])
+    
+    # URL
+    with st.expander("🔗 Video URL", expanded=False):
+        st.write(entry.get('url', 'N/A'))
+        if entry.get('url'):
+            st.link_button("🎬 Open in YouTube", entry['url'])
+    
+    st.divider()
+    
+    # Processing Results
+    if entry.get('status') == 'Completed':
+        # Executive Summary
+        if entry.get('executive_summary'):
+            st.subheader("📋 Executive Summary")
+            st.markdown(entry['executive_summary'])
+            
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                st.download_button(
+                    "📄 Download Summary",
+                    entry['executive_summary'],
+                    file_name=f"summary_{entry.get('video_title', 'video')}.md",
+                    mime="text/markdown"
+                )
+            
+            st.divider()
+        
+        # Detailed Transcript
+        if entry.get('detailed_transcript'):
+            st.subheader("📝 Detailed Structured Transcript")
+            
+            # Search within transcript
+            search_term = st.text_input("🔍 Search within transcript", placeholder="Enter keywords to highlight...")
+            
+            transcript_content = entry['detailed_transcript']
+            
+            # Highlight search terms if provided
+            if search_term:
+                # Simple highlighting (case-insensitive)
+                highlighted_content = re.sub(
+                    f"({re.escape(search_term)})", 
+                    r"**\1**", 
+                    transcript_content, 
+                    flags=re.IGNORECASE
+                )
+                st.markdown(highlighted_content)
+            else:
+                st.markdown(transcript_content)
+            
+            col1, col2, col3 = st.columns([1, 1, 3])
+            with col1:
+                st.download_button(
+                    "📄 Download Transcript",
+                    entry['detailed_transcript'],
+                    file_name=f"transcript_{entry.get('video_title', 'video')}.md",
+                    mime="text/markdown"
+                )
+            
+            with col2:
+                # Combined download
+                if entry.get('executive_summary'):
+                    combined_content = f"""# {entry.get('video_title', 'Video Analysis')}
+
+**Video URL:** {entry.get('url', '')}
+**Channel:** {entry.get('video_channel', 'Unknown')}
+**Processed:** {entry.get('timestamp', '')[:10]}
+
+## Executive Summary
+
+{entry['executive_summary']}
+
+---
+
+## Detailed Transcript
+
+{entry['detailed_transcript']}
+"""
+                    st.download_button(
+                        "📦 Download Complete Analysis",
+                        combined_content,
+                        file_name=f"complete_analysis_{entry.get('video_title', 'video')}.md",
+                        mime="text/markdown"
+                    )
+    
+    elif entry.get('status') == 'Failed':
+        st.error(f"Processing failed: {entry.get('error', 'Unknown error')}")
+        
+        # Option to retry processing
+        if st.button("🔄 Retry Processing", type="primary"):
+            st.info("Redirecting to processing page...")
+            st.session_state.retry_url = entry.get('url')
+            st.session_state.current_page = "main"
+            st.rerun()
+    
+    else:
+        st.info("Processing status: " + entry.get('status', 'Unknown'))
+
 def show_history_page():
-    """Display user's processing history"""
+    """Display enhanced user's processing history"""
     st.header("📚 Processing History")
     
     username = st.session_state.username
@@ -1550,25 +1837,34 @@ def show_history_page():
                 st.metric("Total Videos", stats["total_videos"])
             
             with col2:
-                st.metric("Avg Transcript Length", f"{stats['average_transcript_length']:,} chars")
+                st.metric("Avg Length", f"{stats['average_transcript_length']:,} chars")
             
             with col3:
-                st.metric("Languages Used", len(stats["languages_used"]))
+                st.metric("Languages", ", ".join(stats["languages_used"]))
             
             with col4:
-                st.metric("Models Used", len(stats["models_used"]))
+                st.metric("Success Rate", f"{len([h for h in history if h.get('status') == 'Completed'])}/{len(history)}")
         
         st.divider()
+        
+        # Search and filter
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            search_query = st.text_input("🔍 Search videos", placeholder="Search by title, channel, or URL...")
+        with col2:
+            status_filter = st.selectbox("Filter by Status", ["All", "Completed", "Failed", "Processing"])
+        with col3:
+            language_filter = st.selectbox("Filter by Language", ["All"] + stats["languages_used"])
         
         # History management
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
-            st.subheader("Recent Processing History")
+            st.subheader("Recent Videos")
         with col2:
-            if st.button("🔄 Refresh History"):
+            if st.button("🔄 Refresh", type="secondary"):
                 st.rerun()
         with col3:
-            if st.button("🗑️ Clear All History", type="secondary"):
+            if st.button("🗑️ Clear All", type="secondary"):
                 if st.session_state.get('confirm_clear_history', False):
                     user_data_manager.clear_user_history(username)
                     st.success("History cleared!")
@@ -1576,60 +1872,107 @@ def show_history_page():
                     st.rerun()
                 else:
                     st.session_state.confirm_clear_history = True
-                    st.warning("Click again to confirm clearing all history")
+                    st.warning("Click again to confirm")
         
-        # Display history entries
-        for i, entry in enumerate(history[:20]):  # Show last 20 entries
-            with st.expander(f"🎬 {entry.get('title', 'Unknown Title')} - {entry.get('timestamp', '')[:10]}", expanded=False):
-                col1, col2 = st.columns([3, 1])
+        # Filter history
+        filtered_history = history
+        
+        if search_query:
+            filtered_history = [
+                entry for entry in filtered_history
+                if search_query.lower() in entry.get('video_title', '').lower() or
+                   search_query.lower() in entry.get('video_channel', '').lower() or
+                   search_query.lower() in entry.get('url', '').lower()
+            ]
+        
+        if status_filter != "All":
+            filtered_history = [entry for entry in filtered_history if entry.get('status') == status_filter]
+        
+        if language_filter != "All":
+            filtered_history = [entry for entry in filtered_history if entry.get('language') == language_filter]
+        
+        # Display history entries in a more visual way
+        if filtered_history:
+            for i, entry in enumerate(filtered_history[:20]):  # Show last 20 entries
+                with st.container():
+                    # Create a card-like layout
+                    col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                    
+                    with col1:
+                        # Video title and channel
+                        video_title = entry.get('video_title', entry.get('title', 'Unknown Video'))
+                        st.markdown(f"**{video_title}**")
+                        
+                        if entry.get('video_channel'):
+                            st.caption(f"📺 {entry['video_channel']}")
+                        
+                        # Status badge
+                        status = entry.get('status', 'Unknown')
+                        if status == 'Completed':
+                            st.success(f"✅ {status}")
+                        elif status == 'Failed':
+                            st.error(f"❌ {status}")
+                        else:
+                            st.info(f"⏳ {status}")
+                    
+                    with col2:
+                        st.write(f"**Processed:** {entry.get('timestamp', '')[:10]}")
+                        st.write(f"**Language:** {entry.get('language', 'N/A')}")
+                        st.write(f"**Length:** {entry.get('transcript_length', 0):,} chars")
+                        if entry.get('processing_time'):
+                            st.write(f"**Time:** {entry['processing_time']}")
+                    
+                    with col3:
+                        # View details button
+                        if st.button("👁️ View Details", key=f"view_{entry.get('id', i)}", type="primary"):
+                            st.session_state.current_page = "history_detail"
+                            st.session_state.current_entry_id = entry.get('id')
+                            st.rerun()
+                        
+                        # Quick download for completed items
+                        if entry.get('status') == 'Completed' and entry.get('executive_summary'):
+                            st.download_button(
+                                "📋 Summary",
+                                entry['executive_summary'],
+                                file_name=f"summary_{entry.get('id', i)}.md",
+                                mime="text/markdown",
+                                key=f"download_summary_{entry.get('id', i)}"
+                            )
+                    
+                    with col4:
+                        # Delete button
+                        if st.button("🗑️", key=f"delete_{entry.get('id', i)}", type="secondary", help="Delete this entry"):
+                            user_data_manager.delete_history_entry(username, entry.get('id'))
+                            st.success("Entry deleted!")
+                            st.rerun()
+                        
+                        # Retry button for failed entries
+                        if entry.get('status') == 'Failed':
+                            if st.button("🔄", key=f"retry_{entry.get('id', i)}", type="secondary", help="Retry processing"):
+                                st.session_state.retry_url = entry.get('url')
+                                st.session_state.current_page = "main"
+                                st.rerun()
                 
-                with col1:
-                    st.write(f"**URL:** {entry.get('url', 'N/A')}")
-                    st.write(f"**Language:** {entry.get('language', 'N/A')}")
-                    st.write(f"**Model:** {entry.get('model_used', 'N/A')}")
-                    st.write(f"**Transcript Length:** {entry.get('transcript_length', 0):,} characters")
-                    st.write(f"**Processing Time:** {entry.get('processing_time', 'N/A')}")
-                    st.write(f"**Status:** {entry.get('status', 'N/A')}")
-                    
-                    if entry.get('error'):
-                        st.error(f"**Error:** {entry['error']}")
-                
-                with col2:
-                    # Download buttons if content exists
-                    if entry.get('executive_summary'):
-                        st.download_button(
-                            "📋 Summary",
-                            entry['executive_summary'],
-                            file_name=f"summary_{entry.get('id', i)}.md",
-                            mime="text/markdown",
-                            key=f"download_summary_{entry.get('id', i)}"
-                        )
-                    
-                    if entry.get('detailed_transcript'):
-                        st.download_button(
-                            "📝 Transcript",
-                            entry['detailed_transcript'],
-                            file_name=f"transcript_{entry.get('id', i)}.md",
-                            mime="text/markdown",
-                            key=f"download_transcript_{entry.get('id', i)}"
-                        )
-                    
-                    # Delete button
-                    if st.button("🗑️ Delete", key=f"delete_{entry.get('id', i)}", type="secondary"):
-                        user_data_manager.delete_history_entry(username, entry.get('id'))
-                        st.success("Entry deleted!")
-                        st.rerun()
+                st.divider()
+        
+        else:
+            if search_query or status_filter != "All" or language_filter != "All":
+                st.info("No videos match your search criteria.")
+            else:
+                st.info("No processing history found.")
         
         # Export option
         st.divider()
-        if st.button("💾 Export All Data", type="secondary"):
-            exported_data = user_data_manager.export_user_data(username)
-            st.download_button(
-                "📤 Download Complete Data Export",
-                exported_data,
-                file_name=f"{username}_data_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json"
-            )
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("💾 Export All Data", type="secondary"):
+                exported_data = user_data_manager.export_user_data(username)
+                st.download_button(
+                    "📤 Download Complete Export",
+                    exported_data,
+                    file_name=f"{username}_data_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                    mime="application/json"
+                )
     
     else:
         st.info("No processing history yet. Start by processing some YouTube videos!")
@@ -1731,8 +2074,12 @@ def show_settings_page():
             st.rerun()
 
 def main_app():
-    """Main application interface with enhanced persistence"""
+    """Main application interface with enhanced persistence and navigation"""
     st.title("YouTube Transcript Processor")
+    
+    # Initialize current page if not set
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = "main"
     
     # Sidebar navigation
     with st.sidebar:
@@ -1740,12 +2087,29 @@ def main_app():
         st.divider()
         
         # Navigation
+        page_options = ["🎬 Process Videos", "📚 History", "⚙️ Settings"]
+        current_index = 0
+        
+        # Map current page to index
+        if st.session_state.current_page == "history" or st.session_state.current_page == "history_detail":
+            current_index = 1
+        elif st.session_state.current_page == "settings":
+            current_index = 2
+        
         page = st.radio(
             "Navigation",
-            ["🎬 Process Videos", "📚 History", "⚙️ Settings"],
-            index=0,
+            page_options,
+            index=current_index,
             key="navigation"
         )
+        
+        # Update current page based on navigation
+        if page == "🎬 Process Videos":
+            st.session_state.current_page = "main"
+        elif page == "📚 History":
+            st.session_state.current_page = "history"
+        elif page == "⚙️ Settings":
+            st.session_state.current_page = "settings"
         
         st.divider()
         
@@ -1759,15 +2123,23 @@ def main_app():
         
         # Logout button
         if st.button("🚪 Logout", type="secondary"):
-            for key in ['authenticated', 'username', 'api_keys', 'user_data_manager', 'user_settings']:
+            for key in ['authenticated', 'username', 'api_keys', 'user_data_manager', 'user_settings', 'current_page', 'current_entry_id', 'retry_url']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
     
-    # Main content based on navigation
-    if page == "📚 History":
+    # Main content based on current page
+    if st.session_state.current_page == "history_detail":
+        entry_id = st.session_state.get('current_entry_id')
+        if entry_id:
+            show_history_detail_page(entry_id)
+        else:
+            st.error("No entry selected")
+            st.session_state.current_page = "history"
+            st.rerun()
+    elif st.session_state.current_page == "history":
         show_history_page()
-    elif page == "⚙️ Settings":
+    elif st.session_state.current_page == "settings":
         show_settings_page()
     else:  # Default to Process Videos
         show_main_processing_page()
@@ -1778,6 +2150,12 @@ def show_main_processing_page():
     # Get API keys and user settings
     api_keys = st.session_state.get('api_keys', {})
     user_settings = st.session_state.get('user_settings', {})
+    
+    # Check if there's a retry URL from failed processing
+    retry_url = st.session_state.get('retry_url')
+    if retry_url:
+        st.info(f"Retrying processing for: {retry_url}")
+        st.session_state.retry_url = None  # Clear it
     
     # Configuration Section
     st.header("Configuration")
@@ -1935,6 +2313,7 @@ def show_main_processing_page():
         video_url = st.text_input(
             "YouTube Video URL",
             placeholder="https://www.youtube.com/watch?v=...",
+            value=retry_url if retry_url else "",
             help="Enter a single YouTube video URL"
         )
         if video_url:
