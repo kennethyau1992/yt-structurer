@@ -421,8 +421,21 @@ class YouTubeCookieManager:
             # Check for Render secret file first
             render_cookies = '/etc/secrets/youtube_cookies.txt'
             if os.path.exists(render_cookies):
-                st.info(f"Using Render secret cookies file: {render_cookies}")
-                base_opts['cookiefile'] = render_cookies
+                st.info(f"Found Render secret cookies file: {render_cookies}")
+                # Copy to writable location since Render secrets are read-only
+                import tempfile
+                import shutil
+                try:
+                    temp_cookies = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+                    temp_cookies_path = temp_cookies.name
+                    temp_cookies.close()
+                    
+                    # Copy the cookies file to writable location
+                    shutil.copy2(render_cookies, temp_cookies_path)
+                    st.info(f"Copied cookies to writable location: {temp_cookies_path}")
+                    base_opts['cookiefile'] = temp_cookies_path
+                except Exception as e:
+                    st.warning(f"Failed to copy cookies file: {e}. Trying without authentication...")
             else:
                 # Check for environment variable
                 cookies_file = os.getenv('YOUTUBE_COOKIES_FILE')
