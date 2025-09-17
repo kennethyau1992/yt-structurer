@@ -488,6 +488,10 @@ class PerformanceOptimizedChunker:
             **self.config
         }
     
+    def estimate_tokens(self, text: str) -> int:
+        """Rough token estimation (4 chars ≈ 1 token for most languages)"""
+        return len(text) // 4
+    
     def should_chunk_text(self, text: str) -> bool:
         """Determine if text needs chunking based on performance mode"""
         text_length = len(text)
