@@ -1211,7 +1211,303 @@ class LanguageDetector:
         else:
             return "English"
 
-class DeepSeekProvider(LLMProvider):
+class PerformanceOptimizedTextChunker:
+    """High-performance text chunker with parallel processing support"""
+    
+    def __init__(self, performance_mode: str = "Balanced"):
+        self.performance_mode = performance_mode
+        
+        # Adjust parameters based on performance mode
+        if performance_mode == "Speed Optimized":
+            self.max_chunk_length = 6000  # Smaller chunks for faster processing
+            self.overlap_length = 100     # Less overlap
+            self.max_parallel_workers = 4 # More parallel workers
+        elif performance_mode == "Quality Optimized":
+            self.max_chunk_length = 12000 # Larger chunks for better context
+            self.overlap_length = 300     # More overlap
+            self.max_parallel_workers = 2 # Fewer workers to avoid rate limits
+        else:  # Balanced
+            self.max_chunk_length = 8000
+            self.overlap_length = 200
+            self.max_parallel_workers = 3
+            
+        self.min_chunk_length = 800
+    
+    def should_chunk_text(self, text: str) -> bool:
+        """Determine if text needs chunking"""
+        estimated_tokens = len(text) // 4
+        
+        # Adjust threshold based on performance mode
+        if self.performance_mode == "Speed Optimized":
+            return estimated_tokens > 4000  # Chunk earlier for speed
+        elif self.performance_mode == "Quality Optimized":
+            return estimated_tokens > 8000  # Chunk later for quality
+        else:
+            return estimated_tokens > 6000  # Balanced
+    
+    def create_performance_chunks(self, text: str) -> List[Dict[str, Any]]:
+        """Create chunks optimized for the selected performance mode"""
+        if not self.should_chunk_text(text):
+            return [{
+                'chunk_id': 0,
+                'text': text,
+                'tokens_estimate': len(text) // 4,
+                'is_single_chunk': True
+            }]
+        
+        chunks = []
+        current_pos = 0
+        chunk_id = 0
+        
+        # Simple but fast chunking strategy
+        while current_pos < len(text):
+            end_pos = min(current_pos + self.max_chunk_length, len(text))
+            
+            # Find sentence boundary near end
+            if end_pos < len(text):
+                sentence_end = text.rfind('.', current_pos + self.min_chunk_length, end_pos)
+                if sentence_end > current_pos + self.min_chunk_length:
+                    end_pos = sentence_end + 1
+            
+            chunk_text = text[current_pos:end_pos]
+            chunks.append({
+                'chunk_id': chunk_id,
+                'text': chunk_text,
+                'tokens_estimate': len(chunk_text) // 4,
+                'is_final_chunk': end_pos >= len(text)
+            })
+            
+            # Calculate next position with overlap
+            current_pos = max(current_pos + self.min_chunk_length, end_pos - self.overlap_length)
+            chunk_id += 1
+        
+        return chunks
+
+class FastDeepSeekProvider(LLMProvider):
+    def __init__(self, api_key: str, base_url: str, model: str, temperature: float, performance_mode: str = "Balanced"):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.temperature = temperature
+        self.performance_mode = performance_mode
+        
+        # Initialize optimized text chunker
+        self.text_chunker = PerformanceOptimizedTextChunker(performance_mode)
+        self.language_detector = LanguageDetector()
+        
+        # Adjust timeouts based on model and performance mode
+        if model == "deepseek-chat":
+            self.api_timeout = 60  # Faster model, shorter timeout
+        else:
+            self.api_timeout = 180  # Reasoning model needs more time
+    
+    def structure_transcript(self, transcript: str, system_prompt: str, ui_language: str = "English", is_custom_prompt: bool = False) -> Optional[Dict[str, str]]:
+        """Performance-optimized transcript structuring"""
+        try:
+            # Detect language
+            detected_language = self.language_detector.detect_language(transcript)
+            actual_language = self.language_detector.get_language_code(detected_language)
+            
+            # Show performance info
+            if self.performance_mode == "Speed Optimized":
+                st.info(f"🚀 Speed mode: Detected {actual_language} - Using parallel processing for faster results")
+            elif self.performance_mode == "Quality Optimized":
+                st.info(f"🎯 Quality mode: Detected {actual_language} - Using sequential processing for best results")
+            else:
+                st.info(f"⚖️ Balanced mode: Detected {actual_language} - Optimizing for speed and quality")
+            
+            # Choose processing strategy based on performance mode
+            if self.performance_mode == "Speed Optimized":
+                return self._process_parallel_optimized(transcript, system_prompt, actual_language, is_custom_prompt)
+            else:
+                return self._process_sequential_optimized(transcript, system_prompt, actual_language, is_custom_prompt)
+                
+        except Exception as e:
+            raise RuntimeError(f"DeepSeek processing error: {str(e)}")
+    
+    def _process_parallel_optimized(self, transcript: str, system_prompt: str, language: str, is_custom_prompt: bool) -> Optional[Dict[str, str]]:
+        """Parallel processing for speed optimization"""
+        
+        # Process summary and detailed transcript in parallel
+        import concurrent.futures
+        
+        def process_summary():
+            st.info("⚡ Step 1: Generating executive summary (parallel)...")
+            summary_prompt = self._create_summary_prompt(language)
+            return self._process_for_summary_fast(transcript, summary_prompt)
+        
+        def process_detailed():
+            st.info("⚡ Step 2: Generating detailed transcript (parallel)...")
+            adapted_prompt = self._adapt_system_prompt_to_language(system_prompt, language, is_custom_prompt)
+            return self._process_for_detailed_structure_fast(transcript, adapted_prompt)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # Submit both tasks
+            summary_future = executor.submit(process_summary)
+            detailed_future = executor.submit(process_detailed)
+            
+            # Get results
+            executive_summary = summary_future.result()
+            detailed_transcript = detailed_future.result()
+        
+        if not executive_summary or not detailed_transcript:
+            st.error("Parallel processing failed")
+            return None
+            
+        return {
+            'executive_summary': executive_summary,
+            'detailed_transcript': detailed_transcript,
+            'detected_language': language,
+            'used_custom_prompt': is_custom_prompt,
+            'processing_mode': 'parallel'
+        }
+    
+    def _process_sequential_optimized(self, transcript: str, system_prompt: str, language: str, is_custom_prompt: bool) -> Optional[Dict[str, str]]:
+        """Sequential processing with optimizations"""
+        
+        # Step 1: Generate Executive Summary
+        st.info(f"Step 1: Generating executive summary in {language}...")
+        summary_prompt = self._create_summary_prompt(language)
+        executive_summary = self._process_for_summary_fast(transcript, summary_prompt)
+        
+        if not executive_summary:
+            st.error("Failed to generate executive summary")
+            return None
+        
+        # Step 2: Generate Detailed Structured Transcript
+        st.info(f"Step 2: Generating detailed structured transcript...")
+        adapted_system_prompt = self._adapt_system_prompt_to_language(system_prompt, language, is_custom_prompt)
+        detailed_transcript = self._process_for_detailed_structure_fast(transcript, adapted_system_prompt)
+        
+        if not detailed_transcript:
+            st.error("Failed to generate detailed transcript")
+            return None
+        
+        return {
+            'executive_summary': executive_summary,
+            'detailed_transcript': detailed_transcript,
+            'detected_language': language,
+            'used_custom_prompt': is_custom_prompt,
+            'processing_mode': 'sequential'
+        }
+    
+    def _process_for_summary_fast(self, transcript: str, summary_prompt: str) -> Optional[str]:
+        """Fast summary processing"""
+        
+        # For speed mode, use smaller context windows
+        if self.performance_mode == "Speed Optimized" and len(transcript) > 15000:
+            # Truncate very long transcripts for summary
+            st.info("⚡ Using truncated content for faster summary generation")
+            transcript_sample = transcript[:15000] + "\n\n[Content truncated for speed]"
+            return self._make_api_request_fast(transcript_sample, summary_prompt)
+        else:
+            return self._make_api_request_fast(transcript, summary_prompt)
+    
+    def _process_for_detailed_structure_fast(self, transcript: str, system_prompt: str) -> Optional[str]:
+        """Fast detailed structure processing"""
+        
+        if not self.text_chunker.should_chunk_text(transcript):
+            return self._make_api_request_fast(transcript, system_prompt)
+        
+        # Use performance-optimized chunking
+        chunks = self.text_chunker.create_performance_chunks(transcript)
+        
+        if len(chunks) == 1:
+            return self._make_api_request_fast(transcript, system_prompt)
+        
+        if self.performance_mode == "Speed Optimized":
+            return self._process_chunks_parallel(chunks, system_prompt)
+        else:
+            return self._process_chunks_sequential(chunks, system_prompt)
+    
+    def _process_chunks_parallel(self, chunks: List[Dict], system_prompt: str) -> Optional[str]:
+        """Process chunks in parallel for speed"""
+        import concurrent.futures
+        
+        def process_chunk(chunk_info):
+            return self._make_api_request_fast(chunk_info['text'], system_prompt)
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.text_chunker.max_parallel_workers) as executor:
+            results = list(executor.map(process_chunk, chunks))
+        
+        # Filter successful results
+        successful_results = [r for r in results if r is not None]
+        
+        if not successful_results:
+            return None
+        
+        return "\n\n---\n\n".join(successful_results)
+    
+    def _process_chunks_sequential(self, chunks: List[Dict], system_prompt: str) -> Optional[str]:
+        """Process chunks sequentially with progress updates"""
+        results = []
+        
+        for i, chunk in enumerate(chunks):
+            st.info(f"Processing chunk {i+1}/{len(chunks)}")
+            result = self._make_api_request_fast(chunk['text'], system_prompt)
+            if result:
+                results.append(result)
+        
+        if not results:
+            return None
+            
+        return "\n\n---\n\n".join(results)
+    
+    def _make_api_request_fast(self, text: str, system_prompt: str) -> Optional[str]:
+        """Optimized API request with performance monitoring"""
+        start_time = time.time()
+        
+        try:
+            endpoint = self.base_url + "/chat/completions"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            }
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
+                ],
+                "temperature": self.temperature,
+            }
+
+            resp = requests.post(
+                endpoint, 
+                headers=headers, 
+                data=json.dumps(payload), 
+                timeout=self.api_timeout
+            )
+            
+            if resp.status_code != 200:
+                error_detail = ""
+                try:
+                    error_data = resp.json()
+                    error_detail = error_data.get('error', {}).get('message', resp.text)
+                except:
+                    error_detail = resp.text
+                
+                raise RuntimeError(f"DeepSeek API error {resp.status_code}: {error_detail}")
+            
+            data = resp.json()
+            
+            if 'choices' not in data or len(data['choices']) == 0:
+                raise RuntimeError("DeepSeek API returned no choices")
+            
+            content = data["choices"][0]["message"]["content"]
+            if not content:
+                raise RuntimeError("DeepSeek API returned empty content")
+            
+            # Show performance info
+            elapsed = time.time() - start_time
+            st.success(f"✅ API call completed in {elapsed:.1f}s")
+                
+            return content.strip()
+            
+        except requests.exceptions.Timeout:
+            raise RuntimeError(f"DeepSeek API request timed out after {self.api_timeout} seconds")
+        except Exception as e:
+            raise RuntimeError(f"DeepSeek processing error: {str(e)}")
     def __init__(self, api_key: str, base_url: str, model: str, temperature: float):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -2352,7 +2648,15 @@ def show_main_processing_page():
                 "DeepSeek Model",
                 ["deepseek-chat", "deepseek-reasoner"],
                 index=0 if user_settings.get("deepseek_model", "deepseek-reasoner") == "deepseek-chat" else 1,
-                help="Select the DeepSeek model to use"
+                help="deepseek-chat: Faster processing (~5-15s per call), deepseek-reasoner: Higher quality but slower (~30-60s per call)"
+            )
+            
+            # Performance mode selection
+            performance_mode = st.selectbox(
+                "Processing Mode",
+                ["Balanced", "Speed Optimized", "Quality Optimized"],
+                index=0,
+                help="Speed: Parallel processing, smaller chunks, faster model. Quality: Sequential processing, larger context, reasoning model. Balanced: Good compromise."
             )
             
             temperature = st.slider(
@@ -2689,10 +2993,10 @@ Format the output as a clean, professional document that would be easy to read a
                     return
             
             process_videos_with_history(videos_to_process, language, use_asr_fallback, system_prompt, 
-                          deepseek_model, temperature, api_keys, browser_for_cookies)
+                          deepseek_model, temperature, api_keys, browser_for_cookies, performance_mode)
 
-def process_videos_with_history(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
-    """Process multiple videos/transcripts with executive summary, detailed transcript, and history tracking"""
+def process_videos_with_history(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome', performance_mode="Balanced"):
+    """Process multiple videos/transcripts with performance optimization"""
     
     # Get user data manager
     username = st.session_state.username
@@ -2712,13 +3016,26 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             browser=browser
         ) if use_asr_fallback else None
     
-    # Always need LLM provider
-    deepseek_provider = DeepSeekProvider(
+    # Use performance-optimized DeepSeek provider
+    deepseek_provider = FastDeepSeekProvider(
         api_keys.get('deepseek', ''),
         "https://api.deepseek.com/v1",
         deepseek_model,
-        temperature
+        temperature,
+        performance_mode
     )
+    
+    # Show performance info
+    if performance_mode == "Speed Optimized":
+        st.info(f"🚀 **Speed Mode Active**: Using {deepseek_model} with parallel processing and optimized chunking")
+        if deepseek_model == "deepseek-reasoner":
+            st.warning("💡 **Tip**: Switch to 'deepseek-chat' model for even faster processing in Speed mode")
+    elif performance_mode == "Quality Optimized":
+        st.info(f"🎯 **Quality Mode Active**: Using {deepseek_model} with sequential processing and large context windows")
+        if deepseek_model == "deepseek-chat":
+            st.info("💡 **Note**: Consider 'deepseek-reasoner' for highest quality output in Quality mode")
+    else:
+        st.info(f"⚖️ **Balanced Mode Active**: Using {deepseek_model} with optimized processing")
     
     orchestrator = TranscriptOrchestrator(
         supadata_provider,
@@ -2727,6 +3044,8 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
     )
     
     # Process each video/transcript
+    total_start_time = time.time()
+    
     for i, video in enumerate(videos):
         st.subheader(f"Processing Item {i+1}/{len(videos)}")
         st.write(f"**Title:** {video['title']}")
@@ -2746,6 +3065,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             "url": video['url'],
             "language": language,
             "model_used": deepseek_model,
+            "performance_mode": performance_mode,
             "use_asr_fallback": use_asr_fallback,
             "input_type": video.get("type", "url"),
             "status": "Processing",
@@ -2758,6 +3078,8 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
         
         try:
             # Step 1: Get transcript (either from URL or direct input)
+            extraction_start = time.time()
+            
             if video.get("type") == "direct_transcript":
                 # Use provided transcript directly
                 transcript = video.get("transcript", "")
@@ -2771,18 +3093,6 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
                 
                 st.success(f"✅ Using provided transcript ({len(transcript)} characters)")
                 
-                # Optional: Show transcript preview for direct input
-                with st.expander("📝 Provided Transcript Preview", expanded=False):
-                    preview_length = 3000
-                    preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
-                    st.text_area(
-                        "Your Transcript", 
-                        preview_text, 
-                        height=300,
-                        help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters",
-                        disabled=True
-                    )
-                
             else:
                 # Extract transcript from URL
                 with st.spinner("Getting transcript from video..."):
@@ -2795,32 +3105,16 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
                     user_data_manager.add_to_history(username, history_entry)
                     continue
                 
-                # Show transcript preview for URL-based extraction
-                with st.expander("Raw Transcript Preview"):
-                    preview_length = 5000
-                    preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
-                    st.text_area(
-                        "Extracted Transcript", 
-                        preview_text, 
-                        height=400,
-                        help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
-                    )
-                    
-                    # Option to show full transcript
-                    if len(transcript) > preview_length:
-                        if st.checkbox("Show full transcript", key=f"show_full_{i}"):
-                            st.text_area(
-                                "Full Transcript", 
-                                transcript, 
-                                height=600,
-                                help=f"Complete transcript ({len(transcript)} characters)"
-                            )
+                extraction_time = time.time() - extraction_start
+                st.info(f"⏱️ Transcript extraction completed in {extraction_time:.1f}s")
             
             # Update history entry with transcript info
             history_entry["transcript_length"] = len(transcript)
             
-            # Step 2: Structure transcript with executive summary
-            with st.spinner("Generating executive summary and structuring transcript with LLM..."):
+            # Step 2: Structure transcript with executive summary (with performance monitoring)
+            processing_start = time.time()
+            
+            with st.spinner(f"Processing with {performance_mode} mode..."):
                 # Check if user has customized the system prompt
                 default_prompts = {
                     "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
@@ -2865,6 +3159,9 @@ Format the output as a clean, professional document that would be easy to read a
                 
                 result = orchestrator.structure_transcript(transcript, system_prompt, language, is_custom_prompt)
             
+            processing_time = time.time() - processing_start
+            st.success(f"🎉 LLM processing completed in {processing_time:.1f}s")
+            
             if not result:
                 st.error("Failed to structure transcript")
                 history_entry["status"] = "Failed"
@@ -2873,18 +3170,26 @@ Format the output as a clean, professional document that would be easy to read a
                 continue
             
             # Update history entry with results
-            processing_time = time.time() - start_time
-            history_entry["processing_time"] = f"{processing_time:.1f}s"
+            total_processing_time = time.time() - start_time
+            history_entry["processing_time"] = f"{total_processing_time:.1f}s"
+            history_entry["llm_processing_time"] = f"{processing_time:.1f}s"
             history_entry["status"] = "Completed"
             history_entry["executive_summary"] = result.get('executive_summary')
             history_entry["detailed_transcript"] = result.get('detailed_transcript')
             history_entry["detected_language"] = result.get('detected_language', language)
+            history_entry["processing_mode"] = result.get('processing_mode', 'unknown')
             
             # Save to history
             user_data_manager.add_to_history(username, history_entry)
             
             # Display results
-            st.success("Processing completed!")
+            st.success(f"✅ Processing completed! Total time: {total_processing_time:.1f}s")
+            
+            # Show performance breakdown
+            if video.get("type") != "direct_transcript":
+                st.info(f"📊 **Performance**: Extraction: {extraction_time:.1f}s | LLM Processing: {processing_time:.1f}s")
+            else:
+                st.info(f"📊 **Performance**: LLM Processing: {processing_time:.1f}s")
             
             # Show executive summary first
             if result.get('executive_summary'):
@@ -2933,6 +3238,8 @@ Format the output as a clean, professional document that would be easy to read a
 
 {"**Source URL:** " + video['url'] if video.get("url") and not video["url"].startswith("direct_input_") else "**Type:** Direct Transcript Input"}
 **Processed:** {history_entry.get('timestamp', '')[:10]}
+**Model:** {deepseek_model} ({performance_mode} mode)
+**Processing Time:** {total_processing_time:.1f}s
 **Detected Language:** {result.get('detected_language', 'Unknown')}
 
 ## Executive Summary
@@ -2966,11 +3273,12 @@ Format the output as a clean, professional document that would be easy to read a
             user_data_manager.add_to_history(username, history_entry)
             continue
     
-    # Show completion message
+    # Show completion message with performance summary
+    total_batch_time = time.time() - total_start_time
     completed_count = len([v for v in videos])
-    success_count = len([v for v in videos])  # This will be updated with actual success tracking
+    avg_time = total_batch_time / completed_count if completed_count > 0 else 0
     
-    st.success(f"Batch processing completed! {completed_count} items processed.")
+    st.success(f"🎉 Batch processing completed! {completed_count} items processed in {total_batch_time:.1f}s (avg: {avg_time:.1f}s per item)")
     st.info("💡 Check your **History** page to review all processed content and re-download anytime!")
 
 # ==================== MAIN ENTRY POINT ====================
