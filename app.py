@@ -1160,6 +1160,57 @@ class LLMProvider:
     def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
         raise NotImplementedError
 
+class LanguageDetector:
+    """Detects language of transcript content"""
+    
+    @staticmethod
+    def detect_language(text: str) -> str:
+        """
+        Detect if text is primarily Chinese or English
+        Returns 'Chinese' or 'English'
+        """
+        if not text or len(text.strip()) < 10:
+            return "English"  # Default fallback
+        
+        # Count Chinese characters (CJK ranges)
+        chinese_chars = 0
+        english_chars = 0
+        total_chars = 0
+        
+        for char in text:
+            if '\u4e00' <= char <= '\u9fff' or '\u3400' <= char <= '\u4dbf' or '\uf900' <= char <= '\ufaff':
+                # Chinese characters (including Traditional and Simplified)
+                chinese_chars += 1
+                total_chars += 1
+            elif char.isalpha() and ord(char) < 128:
+                # English/Latin characters
+                english_chars += 1
+                total_chars += 1
+        
+        if total_chars == 0:
+            return "English"  # Default if no detectable characters
+        
+        chinese_ratio = chinese_chars / total_chars
+        english_ratio = english_chars / total_chars
+        
+        # If more than 30% Chinese characters, consider it Chinese
+        if chinese_ratio > 0.3:
+            return "Chinese"
+        # If more than 50% English characters, consider it English
+        elif english_ratio > 0.5:
+            return "English"
+        else:
+            # Ambiguous case, use character count
+            return "Chinese" if chinese_chars > english_chars else "English"
+    
+    @staticmethod
+    def get_language_code(language: str) -> str:
+        """Convert language name to code"""
+        if language == "Chinese":
+            return "中文"
+        else:
+            return "English"
+
 class DeepSeekProvider(LLMProvider):
     def __init__(self, api_key: str, base_url: str, model: str, temperature: float):
         self.api_key = api_key
@@ -1171,12 +1222,20 @@ class DeepSeekProvider(LLMProvider):
             max_chunk_length=8000,  # Conservative for token limits
             overlap_length=200      # Context preservation
         )
+        self.language_detector = LanguageDetector()
     
-    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
-        """Enhanced transcript structuring with executive summary and detailed content"""
+    def structure_transcript(self, transcript: str, system_prompt: str, ui_language: str = "English") -> Optional[Dict[str, str]]:
+        """Enhanced transcript structuring with automatic language detection"""
         try:
-            # Generate both executive summary and detailed structured transcript
-            return self._process_transcript_with_summary(transcript, system_prompt, language)
+            # Detect the actual language of the transcript content
+            detected_language = self.language_detector.detect_language(transcript)
+            actual_language = self.language_detector.get_language_code(detected_language)
+            
+            # Log the detection for user awareness
+            st.info(f"🔍 Detected transcript language: **{actual_language}** (Processing will use detected language)")
+            
+            # Generate both executive summary and detailed structured transcript using detected language
+            return self._process_transcript_with_summary(transcript, system_prompt, actual_language)
                 
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
@@ -1184,8 +1243,8 @@ class DeepSeekProvider(LLMProvider):
     def _process_transcript_with_summary(self, transcript: str, system_prompt: str, language: str) -> Optional[Dict[str, str]]:
         """Process transcript to generate both executive summary and detailed structure"""
         
-        # Step 1: Generate Executive Summary
-        st.info("Step 1: Generating executive summary...")
+        # Step 1: Generate Executive Summary in detected language
+        st.info(f"Step 1: Generating executive summary in {language}...")
         summary_prompt = self._create_summary_prompt(language)
         executive_summary = self._process_for_summary(transcript, summary_prompt, language)
         
@@ -1193,9 +1252,12 @@ class DeepSeekProvider(LLMProvider):
             st.error("Failed to generate executive summary")
             return None
         
-        # Step 2: Generate Detailed Structured Transcript
-        st.info("Step 2: Generating detailed structured transcript...")
-        detailed_transcript = self._process_for_detailed_structure(transcript, system_prompt, language)
+        # Step 2: Generate Detailed Structured Transcript in detected language
+        st.info(f"Step 2: Generating detailed structured transcript in {language}...")
+        
+        # Adapt the system prompt to the detected language if needed
+        adapted_system_prompt = self._adapt_system_prompt_to_language(system_prompt, language)
+        detailed_transcript = self._process_for_detailed_structure(transcript, adapted_system_prompt, language)
         
         if not detailed_transcript:
             st.error("Failed to generate detailed transcript")
@@ -1203,35 +1265,61 @@ class DeepSeekProvider(LLMProvider):
         
         return {
             'executive_summary': executive_summary,
-            'detailed_transcript': detailed_transcript
+            'detailed_transcript': detailed_transcript,
+            'detected_language': language
         }
     
-    def _create_summary_prompt(self, language: str) -> str:
-        """Create a specialized prompt for generating executive summary"""
+    def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str) -> str:
+        """Adapt the system prompt to match the detected language"""
         
-        if language == "English":
-            summary_prompt = """You are an expert at creating concise executive summaries from YouTube video transcripts.
+        if detected_language == "中文":
+            # If content is Chinese but prompt is in English, use Chinese prompt
+            chinese_prompt = """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
 
-Your task is to create a comprehensive EXECUTIVE SUMMARY that captures the key points, main ideas, and essential information from the transcript.
+请按照以下指导原则来结构化转录文本：
 
-Please structure your executive summary with:
+1. **创建清晰的章节和标题**，基于主题变化和内容流程
+2. **提高可读性**：
+   - 修正语法和标点符号
+   - 删除填充词（嗯、呃、那个、就是说）
+   - 合并断裂的句子
+   - 添加段落分隔以改善流畅性
 
-1. **Overview** - A brief 2-3 sentence description of what the video covers
-2. **Key Points** - The main ideas, arguments, or topics discussed (use bullet points)
-3. **Important Details** - Significant facts, statistics, examples, or insights mentioned
-4. **Conclusions/Takeaways** - Main conclusions, recommendations, or actionable insights
+3. **保留所有重要信息** - 不要总结或省略内容
+4. **使用markdown格式** 来设置标题、强调和结构
+5. **在自然主题转换处添加时间戳**
+6. **保持说话者的语调和意思**，同时提高清晰度
 
-Requirements:
-- Keep it concise but comprehensive (aim for 300-500 words)
-- Use bullet points for easy scanning
-- Capture the most important information that someone would need to know
-- Maintain the speaker's key messages and tone
-- Focus on substance over filler content
-- Use clear, professional language
-
-Format using markdown with headers and bullet points for maximum readability."""
+将输出格式化为一个清洁、专业的文档，便于阅读和参考。请用中文输出结构化的转录文本。"""
             
-        else:  # Chinese
+            return chinese_prompt
+        
+        else:  # English
+            # If content is English, ensure English prompt
+            english_prompt = """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
+
+Please structure the transcript following these guidelines:
+
+1. **Create clear sections and headings** based on topic changes and content flow
+2. **Improve readability** by:
+   - Fixing grammar and punctuation
+   - Removing filler words (um, uh, like, you know)
+   - Combining fragmented sentences
+   - Adding paragraph breaks for better flow
+
+3. **Preserve all important information** - don't summarize or omit content
+4. **Use markdown formatting** for headers, emphasis, and structure
+5. **Add timestamps** where natural topic transitions occur
+6. **Maintain the speaker's tone and meaning** while improving clarity
+
+Format the output as a clean, professional document that would be easy to read and reference. Please output the structured transcript in English."""
+            
+            return english_prompt
+    
+    def _create_summary_prompt(self, language: str) -> str:
+        """Create a specialized prompt for generating executive summary in the correct language"""
+        
+        if language == "中文":
             summary_prompt = """你是一个专业的YouTube视频转录文本执行摘要专家。
 
 你的任务是创建一个全面的执行摘要，捕捉转录文本中的关键点、主要观点和重要信息。
@@ -1251,7 +1339,29 @@ Format using markdown with headers and bullet points for maximum readability."""
 - 专注于实质内容而非填充内容
 - 使用清晰、专业的语言
 
-使用markdown格式，包含标题和要点，以获得最大可读性。"""
+使用markdown格式，包含标题和要点，以获得最大可读性。请用中文输出执行摘要。"""
+            
+        else:  # English
+            summary_prompt = """You are an expert at creating concise executive summaries from YouTube video transcripts.
+
+Your task is to create a comprehensive EXECUTIVE SUMMARY that captures the key points, main ideas, and essential information from the transcript.
+
+Please structure your executive summary with:
+
+1. **Overview** - A brief 2-3 sentence description of what the video covers
+2. **Key Points** - The main ideas, arguments, or topics discussed (use bullet points)
+3. **Important Details** - Significant facts, statistics, examples, or insights mentioned
+4. **Conclusions/Takeaways** - Main conclusions, recommendations, or actionable insights
+
+Requirements:
+- Keep it concise but comprehensive (aim for 300-500 words)
+- Use bullet points for easy scanning
+- Capture the most important information that someone would need to know
+- Maintain the speaker's key messages and tone
+- Focus on substance over filler content
+- Use clear, professional language
+
+Format using markdown with headers and bullet points for maximum readability. Please output the executive summary in English."""
         
         return summary_prompt
     
