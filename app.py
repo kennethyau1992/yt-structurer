@@ -2424,14 +2424,15 @@ def show_main_processing_page():
     # Main Processing Section
     st.header("Process Video")
     
-    # Input methods
+    # Input methods - updated with direct transcript option
     input_method = st.radio(
         "Input Method",
-        ["Single Video URL", "Playlist URL", "Batch URLs"],
-        help="Choose how to input videos"
+        ["Single Video URL", "Direct Transcript Input", "Playlist URL", "Batch URLs"],
+        help="Choose how to input videos or transcripts"
     )
     
     videos_to_process = []
+    direct_transcript = None
     
     if input_method == "Single Video URL":
         video_url = st.text_input(
@@ -2441,7 +2442,77 @@ def show_main_processing_page():
             help="Enter a single YouTube video URL"
         )
         if video_url:
-            videos_to_process = [{"title": "Single Video", "url": video_url}]
+            videos_to_process = [{"title": "Single Video", "url": video_url, "type": "url"}]
+    
+    elif input_method == "Direct Transcript Input":
+        st.subheader("📝 Direct Transcript Input")
+        st.info("💡 **Tip:** This option allows you to directly paste a transcript for structuring without needing a YouTube URL.")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            # Title input for the transcript
+            transcript_title = st.text_input(
+                "Transcript Title",
+                placeholder="e.g., 'AI Conference Keynote' or 'Product Launch Presentation'",
+                help="Give your transcript a descriptive title for easy identification"
+            )
+        
+        with col2:
+            # Optional source URL
+            source_url = st.text_input(
+                "Source URL (Optional)",
+                placeholder="https://example.com/source",
+                help="Optional: Add source URL for reference"
+            )
+        
+        # Transcript text input
+        transcript_text = st.text_area(
+            "Paste Your Transcript Here",
+            placeholder="""Paste your transcript text here...
+
+Example:
+Hello everyone, welcome to today's presentation. 
+We'll be covering three main topics: artificial intelligence, 
+machine learning, and their applications in business...
+
+[Paste your complete transcript text]""",
+            height=300,
+            help="Paste the complete transcript you want to structure"
+        )
+        
+        # Character count and language detection preview
+        if transcript_text:
+            char_count = len(transcript_text)
+            word_count = len(transcript_text.split())
+            estimated_tokens = char_count // 4
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Characters", f"{char_count:,}")
+            with col2:
+                st.metric("Words", f"{word_count:,}")
+            with col3:
+                st.metric("Est. Tokens", f"{estimated_tokens:,}")
+            
+            # Preview language detection
+            from datetime import datetime
+            detector = LanguageDetector()
+            detected_lang = detector.detect_language(transcript_text)
+            preview_lang = detector.get_language_code(detected_lang)
+            
+            st.info(f"🔍 **Detected Language:** {preview_lang}")
+            
+            if transcript_title and transcript_text:
+                # Create a pseudo-video entry for processing
+                videos_to_process = [{
+                    "title": transcript_title,
+                    "url": source_url if source_url else f"direct_input_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    "type": "direct_transcript",
+                    "transcript": transcript_text
+                }]
+                
+                st.success(f"✅ Ready to process: **{transcript_title}** ({char_count:,} characters)")
     
     elif input_method == "Playlist URL":
         playlist_url = st.text_input(
@@ -2455,6 +2526,9 @@ def show_main_processing_page():
                     youtube_provider = YouTubeDataProvider(api_keys['youtube'])
                     videos_to_process = youtube_provider.get_playlist_videos(playlist_url)
                     if videos_to_process:
+                        # Mark as URL type
+                        for video in videos_to_process:
+                            video["type"] = "url"
                         st.success(f"Loaded {len(videos_to_process)} videos from playlist")
                         st.session_state.playlist_videos = videos_to_process
     
@@ -2466,7 +2540,7 @@ def show_main_processing_page():
         )
         if batch_urls:
             urls = [url.strip() for url in batch_urls.split('\n') if url.strip()]
-            videos_to_process = [{"title": f"Video {i+1}", "url": url} for i, url in enumerate(urls)]
+            videos_to_process = [{"title": f"Video {i+1}", "url": url, "type": "url"} for i, url in enumerate(urls)]
     
     # Show loaded videos
     if input_method == "Playlist URL" and 'playlist_videos' in st.session_state:
@@ -2542,30 +2616,54 @@ Format the output as a clean, professional document that would be easy to read a
         
         # Processing button
         if st.button("Start Processing", type="primary"):
-            if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
-                st.error("No transcript providers available. Please configure API keys.")
-                return
-            
-            if not api_keys.get('deepseek'):
-                st.error("DeepSeek API key required for structuring. Please configure API keys.")
-                return
+            # Check requirements based on input method
+            if input_method == "Direct Transcript Input":
+                # For direct input, only need DeepSeek
+                if not api_keys.get('deepseek'):
+                    st.error("DeepSeek API key required for structuring transcripts. Please configure API keys.")
+                    return
+                
+                if not videos_to_process:
+                    st.error("Please provide a transcript title and paste your transcript content.")
+                    return
+                    
+                st.info("🚀 Processing direct transcript input - skipping video extraction...")
+                
+            else:
+                # For URL-based processing, need transcript providers
+                if not api_keys.get('supadata') and not api_keys.get('assemblyai'):
+                    st.error("No transcript providers available. Please configure API keys.")
+                    return
+                
+                if not api_keys.get('deepseek'):
+                    st.error("DeepSeek API key required for structuring. Please configure API keys.")
+                    return
             
             process_videos_with_history(videos_to_process, language, use_asr_fallback, system_prompt, 
                           deepseek_model, temperature, api_keys, browser_for_cookies)
 
 def process_videos_with_history(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
-    """Process multiple videos with executive summary, detailed transcript, and history tracking"""
+    """Process multiple videos/transcripts with executive summary, detailed transcript, and history tracking"""
     
     # Get user data manager
     username = st.session_state.username
     user_data_manager = st.session_state.user_data_manager
     
-    # Initialize providers
-    supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
-    assemblyai_provider = ImprovedAssemblyAITranscriptProvider(
-        api_keys.get('assemblyai', ''), 
-        browser=browser
-    ) if use_asr_fallback else None
+    # Initialize providers only if needed
+    supadata_provider = None
+    assemblyai_provider = None
+    
+    # Check if we need transcript extraction providers
+    needs_extraction = any(video.get("type") == "url" for video in videos)
+    
+    if needs_extraction:
+        supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
+        assemblyai_provider = ImprovedAssemblyAITranscriptProvider(
+            api_keys.get('assemblyai', ''), 
+            browser=browser
+        ) if use_asr_fallback else None
+    
+    # Always need LLM provider
     deepseek_provider = DeepSeekProvider(
         api_keys.get('deepseek', ''),
         "https://api.deepseek.com/v1",
@@ -2579,11 +2677,18 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
         deepseek_provider
     )
     
-    # Process each video
+    # Process each video/transcript
     for i, video in enumerate(videos):
-        st.subheader(f"Processing Video {i+1}/{len(videos)}")
+        st.subheader(f"Processing Item {i+1}/{len(videos)}")
         st.write(f"**Title:** {video['title']}")
-        st.write(f"**URL:** {video['url']}")
+        
+        # Show different info based on type
+        if video.get("type") == "direct_transcript":
+            st.write(f"**Type:** Direct Transcript Input")
+            if video.get("url") and not video["url"].startswith("direct_input_"):
+                st.write(f"**Source URL:** {video['url']}")
+        else:
+            st.write(f"**URL:** {video['url']}")
         
         # Initialize history entry
         start_time = time.time()
@@ -2593,6 +2698,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             "language": language,
             "model_used": deepseek_model,
             "use_asr_fallback": use_asr_fallback,
+            "input_type": video.get("type", "url"),
             "status": "Processing",
             "transcript_length": 0,
             "processing_time": "0s",
@@ -2602,41 +2708,67 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
         }
         
         try:
-            # Step 1: Get transcript
-            with st.spinner("Getting transcript..."):
-                transcript = orchestrator.get_transcript(video['url'], language, use_asr_fallback)
-            
-            if not transcript:
-                st.error("Failed to get transcript")
-                history_entry["status"] = "Failed"
-                history_entry["error"] = "Failed to get transcript"
-                user_data_manager.add_to_history(username, history_entry)
-                continue
+            # Step 1: Get transcript (either from URL or direct input)
+            if video.get("type") == "direct_transcript":
+                # Use provided transcript directly
+                transcript = video.get("transcript", "")
+                
+                if not transcript:
+                    st.error("No transcript content provided")
+                    history_entry["status"] = "Failed"
+                    history_entry["error"] = "No transcript content provided"
+                    user_data_manager.add_to_history(username, history_entry)
+                    continue
+                
+                st.success(f"✅ Using provided transcript ({len(transcript)} characters)")
+                
+                # Optional: Show transcript preview for direct input
+                with st.expander("📝 Provided Transcript Preview", expanded=False):
+                    preview_length = 3000
+                    preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
+                    st.text_area(
+                        "Your Transcript", 
+                        preview_text, 
+                        height=300,
+                        help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters",
+                        disabled=True
+                    )
+                
+            else:
+                # Extract transcript from URL
+                with st.spinner("Getting transcript from video..."):
+                    transcript = orchestrator.get_transcript(video['url'], language, use_asr_fallback)
+                
+                if not transcript:
+                    st.error("Failed to get transcript")
+                    history_entry["status"] = "Failed"
+                    history_entry["error"] = "Failed to get transcript from video"
+                    user_data_manager.add_to_history(username, history_entry)
+                    continue
+                
+                # Show transcript preview for URL-based extraction
+                with st.expander("Raw Transcript Preview"):
+                    preview_length = 5000
+                    preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
+                    st.text_area(
+                        "Extracted Transcript", 
+                        preview_text, 
+                        height=400,
+                        help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
+                    )
+                    
+                    # Option to show full transcript
+                    if len(transcript) > preview_length:
+                        if st.checkbox("Show full transcript", key=f"show_full_{i}"):
+                            st.text_area(
+                                "Full Transcript", 
+                                transcript, 
+                                height=600,
+                                help=f"Complete transcript ({len(transcript)} characters)"
+                            )
             
             # Update history entry with transcript info
             history_entry["transcript_length"] = len(transcript)
-            
-            # Show transcript preview
-            with st.expander("Raw Transcript Preview"):
-                # Show first 5000 characters or full transcript if shorter
-                preview_length = 5000
-                preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
-                st.text_area(
-                    "Transcript", 
-                    preview_text, 
-                    height=400,
-                    help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
-                )
-                
-                # Option to show full transcript
-                if len(transcript) > preview_length:
-                    if st.checkbox("Show full transcript", key=f"show_full_{i}"):
-                        st.text_area(
-                            "Full Transcript", 
-                            transcript, 
-                            height=600,
-                            help=f"Complete transcript ({len(transcript)} characters)"
-                        )
             
             # Step 2: Structure transcript with executive summary
             with st.spinner("Generating executive summary and structuring transcript with LLM..."):
@@ -2655,6 +2787,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             history_entry["status"] = "Completed"
             history_entry["executive_summary"] = result.get('executive_summary')
             history_entry["detailed_transcript"] = result.get('detailed_transcript')
+            history_entry["detected_language"] = result.get('detected_language', language)
             
             # Save to history
             user_data_manager.add_to_history(username, history_entry)
@@ -2673,21 +2806,24 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
                     st.markdown(result['detailed_transcript'])
             
             # Download options
+            safe_title = "".join(c for c in video['title'] if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            
             col1, col2, col3 = st.columns(3)
             with col1:
-                st.download_button(
-                    "Download Raw Transcript",
-                    transcript,
-                    file_name=f"raw_transcript_{i+1}.txt",
-                    mime="text/plain"
-                )
+                if video.get("type") != "direct_transcript":  # Only show raw transcript download for URL-based
+                    st.download_button(
+                        "Download Raw Transcript",
+                        transcript,
+                        file_name=f"raw_transcript_{safe_title}.txt",
+                        mime="text/plain"
+                    )
             
             with col2:
                 if result.get('executive_summary'):
                     st.download_button(
                         "Download Executive Summary",
                         result['executive_summary'],
-                        file_name=f"executive_summary_{i+1}.md",
+                        file_name=f"executive_summary_{safe_title}.md",
                         mime="text/markdown"
                     )
             
@@ -2696,13 +2832,17 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
                     st.download_button(
                         "Download Detailed Transcript",
                         result['detailed_transcript'],
-                        file_name=f"detailed_transcript_{i+1}.md",
+                        file_name=f"detailed_transcript_{safe_title}.md",
                         mime="text/markdown"
                     )
             
             # Combined download option
             if result.get('executive_summary') and result.get('detailed_transcript'):
-                combined_content = f"""# Complete Transcript Analysis
+                combined_content = f"""# Complete Transcript Analysis: {video['title']}
+
+{"**Source URL:** " + video['url'] if video.get("url") and not video["url"].startswith("direct_input_") else "**Type:** Direct Transcript Input"}
+**Processed:** {history_entry.get('timestamp', '')[:10]}
+**Detected Language:** {result.get('detected_language', 'Unknown')}
 
 ## Executive Summary
 
@@ -2717,7 +2857,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
                 st.download_button(
                     "📄 Download Complete Analysis",
                     combined_content,
-                    file_name=f"complete_analysis_{i+1}.md",
+                    file_name=f"complete_analysis_{safe_title}.md",
                     mime="text/markdown",
                     type="primary"
                 )
@@ -2725,7 +2865,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             st.divider()
             
         except Exception as e:
-            st.error(f"Error processing video: {str(e)}")
+            st.error(f"Error processing item: {str(e)}")
             
             # Update history entry with error
             processing_time = time.time() - start_time
@@ -2737,8 +2877,10 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
     
     # Show completion message
     completed_count = len([v for v in videos])
-    st.success(f"Batch processing completed! {completed_count} videos processed.")
-    st.info("💡 Check your **History** page to review all processed videos and re-download content anytime!")
+    success_count = len([v for v in videos])  # This will be updated with actual success tracking
+    
+    st.success(f"Batch processing completed! {completed_count} items processed.")
+    st.info("💡 Check your **History** page to review all processed content and re-download anytime!")
 
 # ==================== MAIN ENTRY POINT ====================
 
