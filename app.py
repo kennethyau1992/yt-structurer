@@ -1205,9 +1205,9 @@ class LanguageDetector:
     
     @staticmethod
     def get_language_code(language: str) -> str:
-        """Convert language name to code"""
+        """Convert language name to code - using Traditional Chinese"""
         if language == "Chinese":
-            return "中文"
+            return "繁體中文"  # Traditional Chinese
         else:
             return "English"
 
@@ -1270,27 +1270,27 @@ class DeepSeekProvider(LLMProvider):
         }
     
     def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str) -> str:
-        """Adapt the system prompt to match the detected language"""
+        """Adapt the system prompt to match the detected language - using Traditional Chinese"""
         
-        if detected_language == "中文":
-            # If content is Chinese but prompt is in English, use Chinese prompt
-            chinese_prompt = """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
+        if detected_language == "繁體中文":
+            # Traditional Chinese prompt
+            chinese_prompt = """你是一個專業的YouTube影片轉錄文本分析和結構化專家。你的任務是將原始轉錄文本轉換為組織良好、易於閱讀的文檔。
 
-请按照以下指导原则来结构化转录文本：
+請按照以下指導原則來結構化轉錄文本：
 
-1. **创建清晰的章节和标题**，基于主题变化和内容流程
-2. **提高可读性**：
-   - 修正语法和标点符号
-   - 删除填充词（嗯、呃、那个、就是说）
-   - 合并断裂的句子
-   - 添加段落分隔以改善流畅性
+1. **創建清晰的章節和標題**，基於主題變化和內容流程
+2. **提高可讀性**：
+   - 修正語法和標點符號
+   - 刪除填充詞（嗯、呃、那個、就是說）
+   - 合併斷裂的句子
+   - 添加段落分隔以改善流暢性
 
-3. **保留所有重要信息** - 不要总结或省略内容
-4. **使用markdown格式** 来设置标题、强调和结构
-5. **在自然主题转换处添加时间戳**
-6. **保持说话者的语调和意思**，同时提高清晰度
+3. **保留所有重要信息** - 不要總結或省略內容
+4. **使用markdown格式** 來設置標題、強調和結構
+5. **在自然主題轉換處添加時間戳**
+6. **保持說話者的語調和意思**，同時提高清晰度
 
-将输出格式化为一个清洁、专业的文档，便于阅读和参考。请用中文输出结构化的转录文本。"""
+將輸出格式化為一個清潔、專業的文檔，便於閱讀和參考。請用繁體中文輸出結構化的轉錄文本。"""
             
             return chinese_prompt
         
@@ -1317,29 +1317,29 @@ Format the output as a clean, professional document that would be easy to read a
             return english_prompt
     
     def _create_summary_prompt(self, language: str) -> str:
-        """Create a specialized prompt for generating executive summary in the correct language"""
+        """Create a specialized prompt for generating executive summary in Traditional Chinese"""
         
-        if language == "中文":
-            summary_prompt = """你是一个专业的YouTube视频转录文本执行摘要专家。
+        if language == "繁體中文":
+            summary_prompt = """你是一個專業的YouTube影片轉錄文本執行摘要專家。
 
-你的任务是创建一个全面的执行摘要，捕捉转录文本中的关键点、主要观点和重要信息。
+你的任務是創建一個全面的執行摘要，捕捉轉錄文本中的關鍵點、主要觀點和重要信息。
 
-请按以下结构组织你的执行摘要：
+請按以下結構組織你的執行摘要：
 
-1. **概述** - 简要2-3句话描述视频内容
-2. **关键点** - 讨论的主要观点、论证或话题（使用要点形式）
-3. **重要细节** - 提到的重要事实、统计数据、例子或见解
-4. **结论/要点** - 主要结论、建议或可操作的见解
+1. **概述** - 簡要2-3句話描述影片內容
+2. **關鍵點** - 討論的主要觀點、論證或話題（使用要點形式）
+3. **重要細節** - 提到的重要事實、統計數據、例子或見解
+4. **結論/要點** - 主要結論、建議或可操作的見解
 
 要求：
-- 保持简洁但全面（目标300-500字）
-- 使用要点形式便于扫描
-- 捕捉人们需要了解的最重要信息
-- 保持说话者的关键信息和语调
-- 专注于实质内容而非填充内容
-- 使用清晰、专业的语言
+- 保持簡潔但全面（目標300-500字）
+- 使用要點形式便於掃描
+- 捕捉人們需要了解的最重要信息
+- 保持說話者的關鍵信息和語調
+- 專注於實質內容而非填充內容
+- 使用清晰、專業的語言
 
-使用markdown格式，包含标题和要点，以获得最大可读性。请用中文输出执行摘要。"""
+使用markdown格式，包含標題和要點，以獲得最大可讀性。請用繁體中文輸出執行摘要。"""
             
         else:  # English
             summary_prompt = """You are an expert at creating concise executive summaries from YouTube video transcripts.
