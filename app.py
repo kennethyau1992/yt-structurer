@@ -1508,17 +1508,6 @@ class FastDeepSeekProvider(LLMProvider):
             raise RuntimeError(f"DeepSeek API request timed out after {self.api_timeout} seconds")
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
-    def __init__(self, api_key: str, base_url: str, model: str, temperature: float):
-        self.api_key = api_key
-        self.base_url = base_url.rstrip("/")
-        self.model = model
-        self.temperature = temperature
-        # Initialize text chunker for long transcripts
-        self.text_chunker = LLMTextChunker(
-            max_chunk_length=8000,  # Conservative for token limits
-            overlap_length=200      # Context preservation
-        )
-        self.language_detector = LanguageDetector()
     
     def structure_transcript(self, transcript: str, system_prompt: str, ui_language: str = "English", is_custom_prompt: bool = False) -> Optional[Dict[str, str]]:
         """Enhanced transcript structuring with automatic language detection"""
@@ -3016,7 +3005,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             browser=browser
         ) if use_asr_fallback else None
     
-    # Use performance-optimized DeepSeek provider
+# Use performance-optimized DeepSeek provider
 deepseek_provider = FastDeepSeekProvider(
     api_keys.get('deepseek', ''),
     "https://api.deepseek.com/v1",
