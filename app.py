@@ -875,7 +875,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
 
 class LLMProvider:
     """Base class for LLM providers"""
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
+    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
         raise NotImplementedError
 
 class DeepSeekProvider(LLMProvider):
@@ -890,131 +890,212 @@ class DeepSeekProvider(LLMProvider):
             overlap_length=200      # Context preservation
         )
     
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
-        """Enhanced transcript structuring with intelligent chunking"""
+    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+        """Enhanced transcript structuring with executive summary and detailed content"""
         try:
-            # Determine if chunking is needed
-            if not self.text_chunker.should_chunk_text(transcript):
-                # Process as single chunk
-                return self._process_single_chunk(transcript, system_prompt)
-            else:
-                # Process with intelligent chunking
-                return self._process_with_chunking(transcript, system_prompt)
+            # Generate both executive summary and detailed structured transcript
+            return self._process_transcript_with_summary(transcript, system_prompt)
                 
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
     
-    def _process_single_chunk(self, transcript: str, system_prompt: str) -> Optional[str]:
-        """Process transcript as a single chunk"""
-        st.info("Processing transcript as single chunk...")
-        return self._make_api_request(transcript, system_prompt)
+    def _process_transcript_with_summary(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+        """Process transcript to generate both executive summary and detailed structure"""
+        
+        # Step 1: Generate Executive Summary
+        st.info("Step 1: Generating executive summary...")
+        summary_prompt = self._create_summary_prompt(system_prompt)
+        executive_summary = self._process_for_summary(transcript, summary_prompt)
+        
+        if not executive_summary:
+            st.error("Failed to generate executive summary")
+            return None
+        
+        # Step 2: Generate Detailed Structured Transcript
+        st.info("Step 2: Generating detailed structured transcript...")
+        detailed_transcript = self._process_for_detailed_structure(transcript, system_prompt)
+        
+        if not detailed_transcript:
+            st.error("Failed to generate detailed transcript")
+            return None
+        
+        return {
+            'executive_summary': executive_summary,
+            'detailed_transcript': detailed_transcript
+        }
     
-    def _process_with_chunking(self, transcript: str, system_prompt: str) -> Optional[str]:
-        """Process long transcript with intelligent chunking"""
+    def _create_summary_prompt(self, base_prompt: str) -> str:
+        """Create a specialized prompt for generating executive summary"""
+        
+        if "English" in base_prompt:
+            summary_prompt = """You are an expert at creating concise executive summaries from YouTube video transcripts.
+
+Your task is to create a comprehensive EXECUTIVE SUMMARY that captures the key points, main ideas, and essential information from the transcript.
+
+Please structure your executive summary with:
+
+1. **Overview** - A brief 2-3 sentence description of what the video covers
+2. **Key Points** - The main ideas, arguments, or topics discussed (use bullet points)
+3. **Important Details** - Significant facts, statistics, examples, or insights mentioned
+4. **Conclusions/Takeaways** - Main conclusions, recommendations, or actionable insights
+
+Requirements:
+- Keep it concise but comprehensive (aim for 300-500 words)
+- Use bullet points for easy scanning
+- Capture the most important information that someone would need to know
+- Maintain the speaker's key messages and tone
+- Focus on substance over filler content
+- Use clear, professional language
+
+Format using markdown with headers and bullet points for maximum readability."""
+            
+        else:  # Chinese
+            summary_prompt = """你是一个专业的YouTube视频转录文本执行摘要专家。
+
+你的任务是创建一个全面的执行摘要，捕捉转录文本中的关键点、主要观点和重要信息。
+
+请按以下结构组织你的执行摘要：
+
+1. **概述** - 简要2-3句话描述视频内容
+2. **关键点** - 讨论的主要观点、论证或话题（使用要点形式）
+3. **重要细节** - 提到的重要事实、统计数据、例子或见解
+4. **结论/要点** - 主要结论、建议或可操作的见解
+
+要求：
+- 保持简洁但全面（目标300-500字）
+- 使用要点形式便于扫描
+- 捕捉人们需要了解的最重要信息
+- 保持说话者的关键信息和语调
+- 专注于实质内容而非填充内容
+- 使用清晰、专业的语言
+
+使用markdown格式，包含标题和要点，以获得最大可读性。"""
+        
+        return summary_prompt
+    
+    def _process_for_summary(self, transcript: str, summary_prompt: str) -> Optional[str]:
+        """Process transcript to generate executive summary"""
+        
+        # For summary, we can handle longer text since we're condensing it
+        if self.text_chunker.estimate_tokens(transcript) > 10000:  # ~40k characters
+            st.info("Long transcript detected - using intelligent chunking for summary generation...")
+            return self._process_summary_with_chunking(transcript, summary_prompt)
+        else:
+            return self._make_api_request(transcript, summary_prompt)
+    
+    def _process_summary_with_chunking(self, transcript: str, summary_prompt: str) -> Optional[str]:
+        """Process long transcript with chunking for summary generation"""
+        
+        # Create larger chunks for summary since we're condensing
+        large_chunker = LLMTextChunker(max_chunk_length=12000, overlap_length=300)
+        chunks = large_chunker.create_intelligent_chunks(transcript)
+        
+        if len(chunks) == 1:
+            return self._make_api_request(transcript, summary_prompt)
+        
+        st.info(f"Processing {len(chunks)} chunks for summary generation...")
+        
+        # Generate summary for each chunk
+        chunk_summaries = []
+        for i, chunk in enumerate(chunks):
+            st.info(f"Generating summary for chunk {i+1}/{len(chunks)}")
+            
+            chunk_summary_prompt = f"""
+{summary_prompt}
+
+CHUNK CONTEXT: This is chunk {i+1} of {len(chunks)} from a longer transcript. 
+Focus on summarizing the key points from THIS specific chunk.
+"""
+            
+            chunk_summary = self._make_api_request(chunk['text'], chunk_summary_prompt)
+            if chunk_summary:
+                chunk_summaries.append(chunk_summary)
+        
+        if not chunk_summaries:
+            st.error("Failed to generate any chunk summaries")
+            return None
+        
+        # Combine chunk summaries into final executive summary
+        st.info("Combining chunk summaries into final executive summary...")
+        
+        combined_summaries = "\n\n".join(chunk_summaries)
+        
+        if "English" in summary_prompt:
+            final_summary_prompt = """You are an expert at synthesizing multiple summary chunks into a single, coherent executive summary.
+
+Below are summary chunks from different parts of a video transcript. Your task is to:
+
+1. Combine these chunks into one unified executive summary
+2. Remove redundancy and overlapping points
+3. Organize information logically
+4. Maintain the structure: Overview, Key Points, Important Details, Conclusions/Takeaways
+5. Keep it concise but comprehensive
+
+Create a polished, professional executive summary that flows naturally."""
+            
+        else:  # Chinese
+            final_summary_prompt = """你是一个专业的多摘要块综合专家。
+
+以下是视频转录文本不同部分的摘要块。你的任务是：
+
+1. 将这些块合并成一个统一的执行摘要
+2. 去除冗余和重叠的点
+3. 逻辑性地组织信息
+4. 保持结构：概述、关键点、重要细节、结论/要点
+5. 保持简洁但全面
+
+创建一个精美、专业的执行摘要，自然流畅。"""
+        
+        return self._make_api_request(combined_summaries, final_summary_prompt)
+    
+    def _process_for_detailed_structure(self, transcript: str, system_prompt: str) -> Optional[str]:
+        """Process transcript for detailed structure"""
+        
+        # Determine if chunking is needed
+        if not self.text_chunker.should_chunk_text(transcript):
+            # Process as single chunk
+            return self._make_api_request(transcript, system_prompt)
+        else:
+            # Process with intelligent chunking
+            return self._process_detailed_with_chunking(transcript, system_prompt)
+    
+    def _process_detailed_with_chunking(self, transcript: str, system_prompt: str) -> Optional[str]:
+        """Process long transcript with intelligent chunking for detailed structure"""
         # Create intelligent chunks
         chunks = self.text_chunker.create_intelligent_chunks(transcript)
         
         if len(chunks) == 1:
-            return self._process_single_chunk(transcript, system_prompt)
+            return self._make_api_request(transcript, system_prompt)
         
-        st.info(f"Processing {len(chunks)} chunks with DeepSeek for better results...")
+        st.info(f"Processing {len(chunks)} chunks for detailed structuring...")
         
-        # Process chunks in parallel with context-aware prompts
+        # Process chunks in sequence (not parallel to maintain order)
         processed_chunks = []
-        
-        # Create progress tracking
-        progress_bar = st.progress(0)
-        status_text = st.empty()
         
         # Extract language from system prompt for chunk-specific instructions
         language = "English" if "English" in system_prompt else "中文"
         
-        def process_chunk_with_context(chunk_info):
-            """Process individual chunk with context-aware prompt"""
-            chunk_id = chunk_info['chunk_id']
-            chunk_text = chunk_info['text']
+        for i, chunk_info in enumerate(chunks):
+            st.info(f"Processing detailed chunk {i+1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
             
-            try:
-                status_text.text(f"Processing chunk {chunk_id + 1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
-                
-                # Create context-aware prompt for this chunk
-                chunk_prompt = self.text_chunker.create_chunk_specific_prompt(
-                    system_prompt, chunk_info, len(chunks), language
-                )
-                
-                # Process chunk
-                result = self._make_api_request(chunk_text, chunk_prompt)
-                
-                return {
-                    'chunk_id': chunk_id,
-                    'result': result,
-                    'success': result is not None,
-                    'tokens_estimate': chunk_info['tokens_estimate']
-                }
-                
-            except Exception as e:
-                st.error(f"Chunk {chunk_id + 1} failed: {e}")
-                return {
-                    'chunk_id': chunk_id,
-                    'result': None,
-                    'success': False,
-                    'error': str(e)
-                }
-        
-        # Process chunks with limited parallelism to avoid rate limits
-        max_workers = 2  # Conservative to avoid API rate limits
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all chunks
-            future_to_chunk = {
-                executor.submit(process_chunk_with_context, chunk): chunk 
-                for chunk in chunks
-            }
+            # Create context-aware prompt for this chunk
+            chunk_prompt = self.text_chunker.create_chunk_specific_prompt(
+                system_prompt, chunk_info, len(chunks), language
+            )
             
-            # Collect results as they complete
-            chunk_results = []
-            for future in concurrent.futures.as_completed(future_to_chunk):
-                try:
-                    result = future.result()
-                    chunk_results.append(result)
-                    
-                    if result['success']:
-                        st.success(f"Chunk {result['chunk_id'] + 1} processed")
-                    else:
-                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
-                    
-                    # Update progress
-                    progress_bar.progress(len(chunk_results) / len(chunks))
-                    
-                except Exception as e:
-                    st.error(f"Chunk processing error: {e}")
-        
-        # Sort results by chunk_id
-        chunk_results.sort(key=lambda x: x['chunk_id'])
-        
-        # Combine successful results
-        successful_results = []
-        failed_chunks = []
-        
-        for result in chunk_results:
-            if result['success'] and result['result']:
-                successful_results.append(result['result'])
+            # Process chunk
+            result = self._make_api_request(chunk_info['text'], chunk_prompt)
+            
+            if result:
+                processed_chunks.append(result)
+                st.success(f"Chunk {i+1} processed successfully")
             else:
-                failed_chunks.append(result['chunk_id'] + 1)
-        
-        if not successful_results:
-            st.error("All chunks failed to process")
-            return None
-        
-        if failed_chunks:
-            st.warning(f"Chunks {failed_chunks} failed, but combining successful chunks")
+                st.error(f"Chunk {i+1} failed")
+                return None
         
         # Combine chunks intelligently
-        status_text.text("Combining processed chunks...")
-        combined_result = self._combine_processed_chunks(successful_results, language)
-        
-        progress_bar.progress(1.0)
-        status_text.text(f"Successfully processed and combined {len(successful_results)} chunks!")
+        st.info("Combining processed chunks into final detailed transcript...")
+        combined_result = self._combine_processed_chunks(processed_chunks, language)
         
         return combined_result
     
@@ -1081,11 +1162,11 @@ class DeepSeekProvider(LLMProvider):
         # Simple combination with section separation
         if language == "English":
             separator = "\n\n---\n\n"
-            header = "# Combined Structured Transcript\n\n"
+            header = "# Detailed Structured Transcript\n\n"
             footer = "\n\n---\n*This document was processed in multiple chunks for optimal LLM performance.*"
         else:  # Chinese
             separator = "\n\n---\n\n"
-            header = "# 合并结构化转录文稿\n\n"
+            header = "# 详细结构化转录文稿\n\n"
             footer = "\n\n---\n*本文档经过多块处理以获得最佳LLM性能。*"
         
         # Combine chunks
@@ -1254,7 +1335,7 @@ class TranscriptOrchestrator:
             
         return transcript
     
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[str]:
+    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
         if not self.llm_provider:
             return None
         return self.llm_provider.structure_transcript(transcript, system_prompt)
@@ -1542,10 +1623,10 @@ Format the output as a clean, professional document that would be easy to read a
         }
         
         system_prompt = st.text_area(
-            "System Prompt",
+            "System Prompt for Detailed Transcript",
             value=default_prompts[language],
             height=200,
-            help="Customize how the AI should structure the transcript"
+            help="Customize how the AI should structure the detailed transcript"
         )
         
         # Processing button
@@ -1562,7 +1643,7 @@ Format the output as a clean, professional document that would be easy to read a
                           deepseek_model, temperature, api_keys, browser_for_cookies)
 
 def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
-    """Process multiple videos"""
+    """Process multiple videos with executive summary and detailed transcript"""
     
     # Initialize providers
     supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
@@ -1620,23 +1701,29 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
                             help=f"Complete transcript ({len(transcript)} characters)"
                         )
             
-            # Step 2: Structure transcript
-            with st.spinner("Structuring transcript with LLM..."):
-                structured = orchestrator.structure_transcript(transcript, system_prompt)
+            # Step 2: Structure transcript with executive summary
+            with st.spinner("Generating executive summary and structuring transcript with LLM..."):
+                result = orchestrator.structure_transcript(transcript, system_prompt)
             
-            if not structured:
+            if not result:
                 st.error("Failed to structure transcript")
                 continue
             
             # Display results
             st.success("Processing completed!")
             
-            # Show structured result
-            with st.expander("Structured Transcript", expanded=True):
-                st.markdown(structured)
+            # Show executive summary first
+            if result.get('executive_summary'):
+                with st.expander("📋 Executive Summary", expanded=True):
+                    st.markdown(result['executive_summary'])
+            
+            # Show detailed structured transcript
+            if result.get('detailed_transcript'):
+                with st.expander("📝 Detailed Structured Transcript", expanded=False):
+                    st.markdown(result['detailed_transcript'])
             
             # Download options
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.download_button(
                     "Download Raw Transcript",
@@ -1646,11 +1733,43 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
                 )
             
             with col2:
+                if result.get('executive_summary'):
+                    st.download_button(
+                        "Download Executive Summary",
+                        result['executive_summary'],
+                        file_name=f"executive_summary_{i+1}.md",
+                        mime="text/markdown"
+                    )
+            
+            with col3:
+                if result.get('detailed_transcript'):
+                    st.download_button(
+                        "Download Detailed Transcript",
+                        result['detailed_transcript'],
+                        file_name=f"detailed_transcript_{i+1}.md",
+                        mime="text/markdown"
+                    )
+            
+            # Combined download option
+            if result.get('executive_summary') and result.get('detailed_transcript'):
+                combined_content = f"""# Complete Transcript Analysis
+
+## Executive Summary
+
+{result['executive_summary']}
+
+---
+
+## Detailed Transcript
+
+{result['detailed_transcript']}
+"""
                 st.download_button(
-                    "Download Structured Transcript",
-                    structured,
-                    file_name=f"structured_transcript_{i+1}.md",
-                    mime="text/markdown"
+                    "📄 Download Complete Analysis",
+                    combined_content,
+                    file_name=f"complete_analysis_{i+1}.md",
+                    mime="text/markdown",
+                    type="primary"
                 )
             
             st.divider()
