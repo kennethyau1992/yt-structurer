@@ -1224,7 +1224,7 @@ class DeepSeekProvider(LLMProvider):
         )
         self.language_detector = LanguageDetector()
     
-    def structure_transcript(self, transcript: str, system_prompt: str, ui_language: str = "English") -> Optional[Dict[str, str]]:
+    def structure_transcript(self, transcript: str, system_prompt: str, ui_language: str = "English", is_custom_prompt: bool = False) -> Optional[Dict[str, str]]:
         """Enhanced transcript structuring with automatic language detection"""
         try:
             # Detect the actual language of the transcript content
@@ -1232,15 +1232,18 @@ class DeepSeekProvider(LLMProvider):
             actual_language = self.language_detector.get_language_code(detected_language)
             
             # Log the detection for user awareness
-            st.info(f"🔍 Detected transcript language: **{actual_language}** (Processing will use detected language)")
+            if is_custom_prompt:
+                st.info(f"🔍 Detected transcript language: **{actual_language}** (Using your custom system prompt)")
+            else:
+                st.info(f"🔍 Detected transcript language: **{actual_language}** (Processing will use detected language)")
             
             # Generate both executive summary and detailed structured transcript using detected language
-            return self._process_transcript_with_summary(transcript, system_prompt, actual_language)
+            return self._process_transcript_with_summary(transcript, system_prompt, actual_language, is_custom_prompt)
                 
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
     
-    def _process_transcript_with_summary(self, transcript: str, system_prompt: str, language: str) -> Optional[Dict[str, str]]:
+    def _process_transcript_with_summary(self, transcript: str, system_prompt: str, language: str, is_custom_prompt: bool = False) -> Optional[Dict[str, str]]:
         """Process transcript to generate both executive summary and detailed structure"""
         
         # Step 1: Generate Executive Summary in detected language
@@ -1253,10 +1256,13 @@ class DeepSeekProvider(LLMProvider):
             return None
         
         # Step 2: Generate Detailed Structured Transcript in detected language
-        st.info(f"Step 2: Generating detailed structured transcript in {language}...")
+        if is_custom_prompt:
+            st.info(f"Step 2: Generating detailed structured transcript using your custom prompt (output in {language})...")
+        else:
+            st.info(f"Step 2: Generating detailed structured transcript in {language}...")
         
-        # Adapt the system prompt to the detected language if needed
-        adapted_system_prompt = self._adapt_system_prompt_to_language(system_prompt, language)
+        # Adapt the system prompt to the detected language, preserving user customizations
+        adapted_system_prompt = self._adapt_system_prompt_to_language(system_prompt, language, is_custom_prompt)
         detailed_transcript = self._process_for_detailed_structure(transcript, adapted_system_prompt, language)
         
         if not detailed_transcript:
@@ -1266,12 +1272,24 @@ class DeepSeekProvider(LLMProvider):
         return {
             'executive_summary': executive_summary,
             'detailed_transcript': detailed_transcript,
-            'detected_language': language
+            'detected_language': language,
+            'used_custom_prompt': is_custom_prompt
         }
     
-    def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str) -> str:
-        """Adapt the system prompt to match the detected language - using Traditional Chinese"""
+    def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str, is_custom_prompt: bool = False) -> str:
+        """Adapt the system prompt to match the detected language - but preserve user customizations"""
         
+        # If user has customized the prompt, use it as-is and just add language instruction
+        if is_custom_prompt:
+            language_instruction = ""
+            if detected_language == "繁體中文":
+                language_instruction = "\n\n**重要提醒：請用繁體中文輸出結構化的轉錄文本。**"
+            else:
+                language_instruction = "\n\n**Important: Please output the structured transcript in English.**"
+            
+            return system_prompt + language_instruction
+        
+        # Otherwise, use predefined language-specific prompts
         if detected_language == "繁體中文":
             # Traditional Chinese prompt
             chinese_prompt = """你是一個專業的YouTube影片轉錄文本分析和結構化專家。你的任務是將原始轉錄文本轉換為組織良好、易於閱讀的文檔。
@@ -1724,10 +1742,10 @@ class TranscriptOrchestrator:
             
         return transcript
     
-    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
+    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English", is_custom_prompt: bool = False) -> Optional[Dict[str, str]]:
         if not self.llm_provider:
             return None
-        return self.llm_provider.structure_transcript(transcript, system_prompt, language)
+        return self.llm_provider.structure_transcript(transcript, system_prompt, language, is_custom_prompt)
 
 # ==================== STREAMLIT UI ====================
 
@@ -2566,9 +2584,10 @@ machine learning, and their applications in business...
                 
                 videos_to_process = selected_videos
         
-        # Custom system prompt
+        # Custom system prompt - dynamic based on detected language
         st.subheader("System Prompt")
         
+        # Default prompts
         default_prompts = {
             "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
 
@@ -2588,31 +2607,61 @@ Please structure the transcript following these guidelines:
 
 Format the output as a clean, professional document that would be easy to read and reference.""",
             
-            "中文": """你是一个专业的YouTube视频转录文本分析和结构化专家。你的任务是将原始转录文本转换为组织良好、易于阅读的文档。
+            "繁體中文": """你是一個專業的YouTube影片轉錄文本分析和結構化專家。你的任務是將原始轉錄文本轉換為組織良好、易於閱讀的文檔。
 
-请按照以下指导原则来结构化转录文本：
+請按照以下指導原則來結構化轉錄文本：
 
-1. **创建清晰的章节和标题**，基于主题变化和内容流程
-2. **提高可读性**：
-   - 修正语法和标点符号
-   - 删除填充词（嗯、呃、那个、就是说）
-   - 合并断裂的句子
-   - 添加段落分隔以改善流畅性
+1. **創建清晰的章節和標題**，基於主題變化和內容流程
+2. **提高可讀性**：
+   - 修正語法和標點符號
+   - 刪除填充詞（嗯、呃、那個、就是說）
+   - 合併斷裂的句子
+   - 添加段落分隔以改善流暢性
 
-3. **保留所有重要信息** - 不要总结或省略内容
-4. **使用markdown格式** 来设置标题、强调和结构
-5. **在自然主题转换处添加时间戳**
-6. **保持说话者的语调和意思**，同时提高清晰度
+3. **保留所有重要信息** - 不要總結或省略內容
+4. **使用markdown格式** 來設置標題、強調和結構
+5. **在自然主題轉換處添加時間戳**
+6. **保持說話者的語調和意思**，同時提高清晰度
 
-将输出格式化为一个清洁、专业的文档，便于阅读和参考。"""
+將輸出格式化為一個清潔、專業的文檔，便於閱讀和參考。"""
         }
+        
+        # Determine which prompt to show based on content language detection
+        prompt_language = language  # Default to UI language
+        
+        # For direct transcript input, detect language from content
+        if input_method == "Direct Transcript Input" and 'transcript_text' in locals() and transcript_text:
+            detector = LanguageDetector()
+            detected_lang = detector.detect_language(transcript_text)
+            if detected_lang == "Chinese":
+                prompt_language = "繁體中文"
+                st.info(f"🔍 **System prompt adapted to detected language:** {prompt_language}")
+            else:
+                prompt_language = "English"
+                st.info(f"🔍 **System prompt adapted to detected language:** {prompt_language}")
+        
+        # For URL-based input, use UI language selection but show hint
+        elif input_method != "Direct Transcript Input":
+            if language == "中文":
+                prompt_language = "繁體中文"
+            st.info(f"💡 **System prompt language:** {prompt_language} (Will auto-adapt based on video content during processing)")
         
         system_prompt = st.text_area(
             "System Prompt for Detailed Transcript",
-            value=default_prompts[language],
+            value=default_prompts[prompt_language],
             height=200,
-            help="Customize how the AI should structure the detailed transcript"
+            help="Customize how the AI should structure the detailed transcript. This prompt will be used as-is, so modify it according to your needs."
         )
+        
+        # Show warning if user modified the prompt
+        if system_prompt != default_prompts[prompt_language]:
+            st.success("✅ **Custom system prompt detected** - Your modifications will be used for processing!")
+        
+        # Reset prompt button
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("🔄 Reset to Default", help="Reset to default system prompt"):
+                st.rerun()
         
         # Processing button
         if st.button("Start Processing", type="primary"):
@@ -2772,7 +2821,49 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             
             # Step 2: Structure transcript with executive summary
             with st.spinner("Generating executive summary and structuring transcript with LLM..."):
-                result = orchestrator.structure_transcript(transcript, system_prompt, language)
+                # Check if user has customized the system prompt
+                default_prompts = {
+                    "English": """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
+
+Please structure the transcript following these guidelines:
+
+1. **Create clear sections and headings** based on topic changes and content flow
+2. **Improve readability** by:
+   - Fixing grammar and punctuation
+   - Removing filler words (um, uh, like, you know)
+   - Combining fragmented sentences
+   - Adding paragraph breaks for better flow
+
+3. **Preserve all important information** - don't summarize or omit content
+4. **Use markdown formatting** for headers, emphasis, and structure
+5. **Add timestamps** where natural topic transitions occur
+6. **Maintain the speaker's tone and meaning** while improving clarity
+
+Format the output as a clean, professional document that would be easy to read and reference.""",
+                    
+                    "繁體中文": """你是一個專業的YouTube影片轉錄文本分析和結構化專家。你的任務是將原始轉錄文本轉換為組織良好、易於閱讀的文檔。
+
+請按照以下指導原則來結構化轉錄文本：
+
+1. **創建清晰的章節和標題**，基於主題變化和內容流程
+2. **提高可讀性**：
+   - 修正語法和標點符號
+   - 刪除填充詞（嗯、呃、那個、就是說）
+   - 合併斷裂的句子
+   - 添加段落分隔以改善流暢性
+
+3. **保留所有重要信息** - 不要總結或省略內容
+4. **使用markdown格式** 來設置標題、強調和結構
+5. **在自然主題轉換處添加時間戳**
+6. **保持說話者的語調和意思**，同時提高清晰度
+
+將輸出格式化為一個清潔、專業的文檔，便於閱讀和參考。"""
+                }
+                
+                # Determine if the system prompt has been customized
+                is_custom_prompt = (system_prompt not in default_prompts.values())
+                
+                result = orchestrator.structure_transcript(transcript, system_prompt, language, is_custom_prompt)
             
             if not result:
                 st.error("Failed to structure transcript")
