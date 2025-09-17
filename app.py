@@ -3017,13 +3017,13 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
         ) if use_asr_fallback else None
     
     # Use performance-optimized DeepSeek provider
-    deepseek_provider = DeepSeekProvider(
-        api_keys.get('deepseek', ''),
-        "https://api.deepseek.com/v1",
-        deepseek_model,
-        temperature,
-        performance_mode
-    )
+deepseek_provider = FastDeepSeekProvider(
+    api_keys.get('deepseek', ''),
+    "https://api.deepseek.com/v1",
+    deepseek_model,
+    temperature,
+    performance_mode
+)
     
     # Show performance info
     if performance_mode == "Speed Optimized":
