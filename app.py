@@ -9,6 +9,152 @@ from typing import Optional, List, Dict, Tuple, Any
 import requests
 import streamlit as st
 
+# ==================== PERSISTENCE LAYER ====================
+
+class UserDataManager:
+    """Manages persistent storage of user settings and history"""
+    
+    def __init__(self, base_dir: str = "user_data"):
+        """
+        Initialize user data manager
+        
+        Args:
+            base_dir: Base directory for storing user data
+        """
+        self.base_dir = base_dir
+        self.ensure_data_directory()
+    
+    def ensure_data_directory(self):
+        """Ensure the data directory exists"""
+        if not os.path.exists(self.base_dir):
+            os.makedirs(self.base_dir)
+    
+    def get_user_data_path(self, username: str) -> str:
+        """Get the path to user's data file"""
+        return os.path.join(self.base_dir, f"{username}_data.json")
+    
+    def load_user_data(self, username: str) -> Dict:
+        """Load user data from file"""
+        data_path = self.get_user_data_path(username)
+        
+        default_data = {
+            "settings": {
+                "language": "English",
+                "use_asr_fallback": True,
+                "deepseek_model": "deepseek-reasoner",
+                "temperature": 0.1,
+                "browser_for_cookies": "none"
+            },
+            "history": [],
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        try:
+            if os.path.exists(data_path):
+                with open(data_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # Ensure all required keys exist
+                for key in default_data:
+                    if key not in data:
+                        data[key] = default_data[key]
+                # Ensure all settings exist
+                for setting_key in default_data["settings"]:
+                    if setting_key not in data["settings"]:
+                        data["settings"][setting_key] = default_data["settings"][setting_key]
+                return data
+            else:
+                return default_data
+        except Exception as e:
+            st.warning(f"Could not load user data: {e}. Using defaults.")
+            return default_data
+    
+    def save_user_data(self, username: str, data: Dict):
+        """Save user data to file"""
+        data_path = self.get_user_data_path(username)
+        data["last_updated"] = datetime.now().isoformat()
+        
+        try:
+            with open(data_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            st.error(f"Could not save user data: {e}")
+    
+    def save_user_settings(self, username: str, settings: Dict):
+        """Save user settings"""
+        data = self.load_user_data(username)
+        data["settings"].update(settings)
+        self.save_user_data(username, data)
+    
+    def get_user_settings(self, username: str) -> Dict:
+        """Get user settings"""
+        data = self.load_user_data(username)
+        return data["settings"]
+    
+    def add_to_history(self, username: str, entry: Dict):
+        """Add entry to user's processing history"""
+        data = self.load_user_data(username)
+        
+        # Add timestamp and unique ID
+        entry["timestamp"] = datetime.now().isoformat()
+        entry["id"] = hashlib.md5(f"{entry['url']}_{entry['timestamp']}".encode()).hexdigest()[:8]
+        
+        # Add to beginning of history
+        data["history"].insert(0, entry)
+        
+        # Keep only last 100 entries
+        data["history"] = data["history"][:100]
+        
+        self.save_user_data(username, data)
+    
+    def get_user_history(self, username: str) -> List[Dict]:
+        """Get user's processing history"""
+        data = self.load_user_data(username)
+        return data["history"]
+    
+    def delete_history_entry(self, username: str, entry_id: str):
+        """Delete a specific history entry"""
+        data = self.load_user_data(username)
+        data["history"] = [entry for entry in data["history"] if entry.get("id") != entry_id]
+        self.save_user_data(username, data)
+    
+    def clear_user_history(self, username: str):
+        """Clear all user history"""
+        data = self.load_user_data(username)
+        data["history"] = []
+        self.save_user_data(username, data)
+    
+    def export_user_data(self, username: str) -> str:
+        """Export user data as JSON string"""
+        data = self.load_user_data(username)
+        return json.dumps(data, indent=2, ensure_ascii=False)
+    
+    def get_history_statistics(self, username: str) -> Dict:
+        """Get statistics about user's history"""
+        history = self.get_user_history(username)
+        
+        if not history:
+            return {
+                "total_videos": 0,
+                "total_transcript_length": 0,
+                "average_transcript_length": 0,
+                "most_recent": None,
+                "languages_used": [],
+                "models_used": []
+            }
+        
+        total_length = sum(entry.get("transcript_length", 0) for entry in history)
+        languages = list(set(entry.get("language", "Unknown") for entry in history))
+        models = list(set(entry.get("model_used", "Unknown") for entry in history))
+        
+        return {
+            "total_videos": len(history),
+            "total_transcript_length": total_length,
+            "average_transcript_length": total_length // len(history) if history else 0,
+            "most_recent": history[0].get("timestamp") if history else None,
+            "languages_used": languages,
+            "models_used": models
+        }
+
 # ==================== AUTHENTICATION LAYER ====================
 
 class AuthManager:
@@ -28,6 +174,9 @@ class AuthManager:
                 }
             }
         }
+        
+        # Initialize user data manager
+        self.user_data_manager = UserDataManager()
         
         # Load additional users from environment variables if available
         self._load_users_from_env()
@@ -98,6 +247,10 @@ class AuthManager:
             "password_hash": self._hash_password(password),
             "api_keys": api_keys or {"supadata": "", "assemblyai": "", "deepseek": "", "youtube": ""}
         }
+    
+    def get_user_data_manager(self) -> UserDataManager:
+        """Get the user data manager instance"""
+        return self.user_data_manager
 
 # ==================== YOUTUBE COOKIE MANAGER ====================
 
@@ -1365,6 +1518,12 @@ def login_page():
                 st.session_state.authenticated = True
                 st.session_state.username = username
                 st.session_state.api_keys = auth_manager.get_user_api_keys(username)
+                st.session_state.user_data_manager = auth_manager.get_user_data_manager()
+                
+                # Load user settings
+                user_settings = st.session_state.user_data_manager.get_user_settings(username)
+                st.session_state.user_settings = user_settings
+                
                 st.success("Login successful!")
                 st.rerun()
                 return True
@@ -1374,23 +1533,254 @@ def login_page():
     
     return False
 
+def show_history_page():
+    """Display user's processing history"""
+    st.header("📚 Processing History")
+    
+    username = st.session_state.username
+    user_data_manager = st.session_state.user_data_manager
+    
+    # Get history and statistics
+    history = user_data_manager.get_user_history(username)
+    stats = user_data_manager.get_history_statistics(username)
+    
+    # Show statistics
+    if stats["total_videos"] > 0:
+        with st.container():
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total Videos", stats["total_videos"])
+            
+            with col2:
+                st.metric("Avg Transcript Length", f"{stats['average_transcript_length']:,} chars")
+            
+            with col3:
+                st.metric("Languages Used", len(stats["languages_used"]))
+            
+            with col4:
+                st.metric("Models Used", len(stats["models_used"]))
+        
+        st.divider()
+        
+        # History management
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.subheader("Recent Processing History")
+        with col2:
+            if st.button("🔄 Refresh History"):
+                st.rerun()
+        with col3:
+            if st.button("🗑️ Clear All History", type="secondary"):
+                if st.session_state.get('confirm_clear_history', False):
+                    user_data_manager.clear_user_history(username)
+                    st.success("History cleared!")
+                    st.session_state.confirm_clear_history = False
+                    st.rerun()
+                else:
+                    st.session_state.confirm_clear_history = True
+                    st.warning("Click again to confirm clearing all history")
+        
+        # Display history entries
+        for i, entry in enumerate(history[:20]):  # Show last 20 entries
+            with st.expander(f"🎬 {entry.get('title', 'Unknown Title')} - {entry.get('timestamp', '')[:10]}", expanded=False):
+                col1, col2 = st.columns([3, 1])
+                
+                with col1:
+                    st.write(f"**URL:** {entry.get('url', 'N/A')}")
+                    st.write(f"**Language:** {entry.get('language', 'N/A')}")
+                    st.write(f"**Model:** {entry.get('model_used', 'N/A')}")
+                    st.write(f"**Transcript Length:** {entry.get('transcript_length', 0):,} characters")
+                    st.write(f"**Processing Time:** {entry.get('processing_time', 'N/A')}")
+                    st.write(f"**Status:** {entry.get('status', 'N/A')}")
+                    
+                    if entry.get('error'):
+                        st.error(f"**Error:** {entry['error']}")
+                
+                with col2:
+                    # Download buttons if content exists
+                    if entry.get('executive_summary'):
+                        st.download_button(
+                            "📋 Summary",
+                            entry['executive_summary'],
+                            file_name=f"summary_{entry.get('id', i)}.md",
+                            mime="text/markdown",
+                            key=f"download_summary_{entry.get('id', i)}"
+                        )
+                    
+                    if entry.get('detailed_transcript'):
+                        st.download_button(
+                            "📝 Transcript",
+                            entry['detailed_transcript'],
+                            file_name=f"transcript_{entry.get('id', i)}.md",
+                            mime="text/markdown",
+                            key=f"download_transcript_{entry.get('id', i)}"
+                        )
+                    
+                    # Delete button
+                    if st.button("🗑️ Delete", key=f"delete_{entry.get('id', i)}", type="secondary"):
+                        user_data_manager.delete_history_entry(username, entry.get('id'))
+                        st.success("Entry deleted!")
+                        st.rerun()
+        
+        # Export option
+        st.divider()
+        if st.button("💾 Export All Data", type="secondary"):
+            exported_data = user_data_manager.export_user_data(username)
+            st.download_button(
+                "📤 Download Complete Data Export",
+                exported_data,
+                file_name=f"{username}_data_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json"
+            )
+    
+    else:
+        st.info("No processing history yet. Start by processing some YouTube videos!")
+        if st.button("➡️ Go to Video Processing"):
+            st.session_state.current_page = "main"
+            st.rerun()
+
+def show_settings_page():
+    """Display user settings management"""
+    st.header("⚙️ User Settings")
+    
+    username = st.session_state.username
+    user_data_manager = st.session_state.user_data_manager
+    
+    # Load current settings
+    current_settings = user_data_manager.get_user_settings(username)
+    
+    with st.form("settings_form"):
+        st.subheader("Default Processing Settings")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            language = st.selectbox(
+                "Default Language",
+                ["English", "中文"],
+                index=0 if current_settings.get("language", "English") == "English" else 1,
+                help="Default language for transcription"
+            )
+            
+            use_asr_fallback = st.checkbox(
+                "Enable ASR Fallback by Default",
+                value=current_settings.get("use_asr_fallback", True),
+                help="Use AssemblyAI when official captions are not available"
+            )
+            
+            deepseek_model = st.selectbox(
+                "Default DeepSeek Model",
+                ["deepseek-chat", "deepseek-reasoner"],
+                index=0 if current_settings.get("deepseek_model", "deepseek-reasoner") == "deepseek-chat" else 1,
+                help="Default model for processing"
+            )
+        
+        with col2:
+            temperature = st.slider(
+                "Default Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=current_settings.get("temperature", 0.1),
+                step=0.1,
+                help="Controls randomness in LLM responses"
+            )
+            
+            browser_for_cookies = st.selectbox(
+                "Default Browser for Cookies",
+                ["none", "chrome", "firefox", "edge", "safari"],
+                index=["none", "chrome", "firefox", "edge", "safari"].index(
+                    current_settings.get("browser_for_cookies", "none")
+                ),
+                help="Default browser for YouTube cookies"
+            )
+        
+        st.divider()
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            save_settings = st.form_submit_button("💾 Save Settings", type="primary")
+        
+        with col2:
+            reset_settings = st.form_submit_button("🔄 Reset to Defaults", type="secondary")
+        
+        if save_settings:
+            new_settings = {
+                "language": language,
+                "use_asr_fallback": use_asr_fallback,
+                "deepseek_model": deepseek_model,
+                "temperature": temperature,
+                "browser_for_cookies": browser_for_cookies
+            }
+            
+            user_data_manager.save_user_settings(username, new_settings)
+            st.session_state.user_settings = new_settings
+            st.success("Settings saved successfully!")
+            st.rerun()
+        
+        if reset_settings:
+            default_settings = {
+                "language": "English",
+                "use_asr_fallback": True,
+                "deepseek_model": "deepseek-reasoner",
+                "temperature": 0.1,
+                "browser_for_cookies": "none"
+            }
+            
+            user_data_manager.save_user_settings(username, default_settings)
+            st.session_state.user_settings = default_settings
+            st.success("Settings reset to defaults!")
+            st.rerun()
+
 def main_app():
-    """Main application interface"""
+    """Main application interface with enhanced persistence"""
     st.title("YouTube Transcript Processor")
     
-    # Logout button
-    col1, col2 = st.columns([6, 1])
-    with col2:
-        if st.button("Logout"):
-            for key in ['authenticated', 'username', 'api_keys']:
+    # Sidebar navigation
+    with st.sidebar:
+        st.write(f"Welcome, **{st.session_state.username}**!")
+        st.divider()
+        
+        # Navigation
+        page = st.radio(
+            "Navigation",
+            ["🎬 Process Videos", "📚 History", "⚙️ Settings"],
+            index=0,
+            key="navigation"
+        )
+        
+        st.divider()
+        
+        # Quick stats
+        if 'user_data_manager' in st.session_state:
+            stats = st.session_state.user_data_manager.get_history_statistics(st.session_state.username)
+            st.metric("Videos Processed", stats["total_videos"])
+            st.metric("Total Characters", f"{stats['total_transcript_length']:,}")
+        
+        st.divider()
+        
+        # Logout button
+        if st.button("🚪 Logout", type="secondary"):
+            for key in ['authenticated', 'username', 'api_keys', 'user_data_manager', 'user_settings']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
     
-    st.write(f"Welcome, **{st.session_state.username}**!")
+    # Main content based on navigation
+    if page == "📚 History":
+        show_history_page()
+    elif page == "⚙️ Settings":
+        show_settings_page()
+    else:  # Default to Process Videos
+        show_main_processing_page()
+
+def show_main_processing_page():
+    """Show the main video processing interface"""
     
-    # Get API keys from session
+    # Get API keys and user settings
     api_keys = st.session_state.get('api_keys', {})
+    user_settings = st.session_state.get('user_settings', {})
     
     # Configuration Section
     st.header("Configuration")
@@ -1422,7 +1812,7 @@ def main_app():
             else:
                 st.error("YouTube Data")
     
-    # Settings
+    # Settings - Load from user preferences
     with st.expander("Processing Settings"):
         col1, col2, col3 = st.columns(3)
         
@@ -1430,12 +1820,13 @@ def main_app():
             language = st.selectbox(
                 "Language",
                 ["English", "中文"],
+                index=0 if user_settings.get("language", "English") == "English" else 1,
                 help="Select the language for transcription"
             )
             
             use_asr_fallback = st.checkbox(
                 "Enable ASR Fallback",
-                value=True,
+                value=user_settings.get("use_asr_fallback", True),
                 help="Use AssemblyAI when official captions are not available"
             )
         
@@ -1443,7 +1834,7 @@ def main_app():
             deepseek_model = st.selectbox(
                 "DeepSeek Model",
                 ["deepseek-chat", "deepseek-reasoner"],
-                index=1,
+                index=0 if user_settings.get("deepseek_model", "deepseek-reasoner") == "deepseek-chat" else 1,
                 help="Select the DeepSeek model to use"
             )
             
@@ -1451,7 +1842,7 @@ def main_app():
                 "Temperature",
                 min_value=0.0,
                 max_value=1.0,
-                value=0.1,
+                value=user_settings.get("temperature", 0.1),
                 step=0.1,
                 help="Controls randomness in LLM responses"
             )
@@ -1460,11 +1851,31 @@ def main_app():
             browser_for_cookies = st.selectbox(
                 "Browser for YouTube Cookies",
                 ["none", "chrome", "firefox", "edge", "safari"],
+                index=["none", "chrome", "firefox", "edge", "safari"].index(
+                    user_settings.get("browser_for_cookies", "none")
+                ),
                 help="Select browser for cookies (use 'none' on Linux/servers)"
             )
             
-            # Option to upload cookies file
-            st.info("For Linux/Server: Upload cookies.txt file or set YOUTUBE_COOKIES_FILE env var")
+            # Auto-save settings option
+            if st.checkbox("Auto-save these settings", value=True):
+                # Save current settings automatically when changed
+                current_form_settings = {
+                    "language": language,
+                    "use_asr_fallback": use_asr_fallback,
+                    "deepseek_model": deepseek_model,
+                    "temperature": temperature,
+                    "browser_for_cookies": browser_for_cookies
+                }
+                
+                # Check if settings changed
+                if current_form_settings != user_settings:
+                    st.session_state.user_data_manager.save_user_settings(
+                        st.session_state.username, 
+                        current_form_settings
+                    )
+                    st.session_state.user_settings = current_form_settings
+                    st.success("✅ Settings auto-saved!")
     
     # Cookie file upload section (for Linux/containers)
     with st.expander("YouTube Authentication (for ASR)", expanded=False):
@@ -1639,11 +2050,15 @@ Format the output as a clean, professional document that would be easy to read a
                 st.error("DeepSeek API key required for structuring. Please configure API keys.")
                 return
             
-            process_videos(videos_to_process, language, use_asr_fallback, system_prompt, 
+            process_videos_with_history(videos_to_process, language, use_asr_fallback, system_prompt, 
                           deepseek_model, temperature, api_keys, browser_for_cookies)
 
-def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
-    """Process multiple videos with executive summary and detailed transcript"""
+def process_videos_with_history(videos, language, use_asr_fallback, system_prompt, deepseek_model, temperature, api_keys, browser='chrome'):
+    """Process multiple videos with executive summary, detailed transcript, and history tracking"""
+    
+    # Get user data manager
+    username = st.session_state.username
+    user_data_manager = st.session_state.user_data_manager
     
     # Initialize providers
     supadata_provider = SupadataTranscriptProvider(api_keys.get('supadata', ''))
@@ -1670,6 +2085,22 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
         st.write(f"**Title:** {video['title']}")
         st.write(f"**URL:** {video['url']}")
         
+        # Initialize history entry
+        start_time = time.time()
+        history_entry = {
+            "title": video['title'],
+            "url": video['url'],
+            "language": language,
+            "model_used": deepseek_model,
+            "use_asr_fallback": use_asr_fallback,
+            "status": "Processing",
+            "transcript_length": 0,
+            "processing_time": "0s",
+            "executive_summary": None,
+            "detailed_transcript": None,
+            "error": None
+        }
+        
         try:
             # Step 1: Get transcript
             with st.spinner("Getting transcript..."):
@@ -1677,17 +2108,23 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             
             if not transcript:
                 st.error("Failed to get transcript")
+                history_entry["status"] = "Failed"
+                history_entry["error"] = "Failed to get transcript"
+                user_data_manager.add_to_history(username, history_entry)
                 continue
+            
+            # Update history entry with transcript info
+            history_entry["transcript_length"] = len(transcript)
             
             # Show transcript preview
             with st.expander("Raw Transcript Preview"):
                 # Show first 5000 characters or full transcript if shorter
-                preview_length = 5000  # Increase this for longer preview
+                preview_length = 5000
                 preview_text = transcript[:preview_length] + "..." if len(transcript) > preview_length else transcript
                 st.text_area(
                     "Transcript", 
                     preview_text, 
-                    height=400,  # Increased height for more content
+                    height=400,
                     help=f"Showing {min(preview_length, len(transcript))} of {len(transcript)} characters"
                 )
                 
@@ -1707,7 +2144,20 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             
             if not result:
                 st.error("Failed to structure transcript")
+                history_entry["status"] = "Failed"
+                history_entry["error"] = "Failed to structure transcript"
+                user_data_manager.add_to_history(username, history_entry)
                 continue
+            
+            # Update history entry with results
+            processing_time = time.time() - start_time
+            history_entry["processing_time"] = f"{processing_time:.1f}s"
+            history_entry["status"] = "Completed"
+            history_entry["executive_summary"] = result.get('executive_summary')
+            history_entry["detailed_transcript"] = result.get('detailed_transcript')
+            
+            # Save to history
+            user_data_manager.add_to_history(username, history_entry)
             
             # Display results
             st.success("Processing completed!")
@@ -1776,12 +2226,24 @@ def process_videos(videos, language, use_asr_fallback, system_prompt, deepseek_m
             
         except Exception as e:
             st.error(f"Error processing video: {str(e)}")
+            
+            # Update history entry with error
+            processing_time = time.time() - start_time
+            history_entry["processing_time"] = f"{processing_time:.1f}s"
+            history_entry["status"] = "Failed"
+            history_entry["error"] = str(e)
+            user_data_manager.add_to_history(username, history_entry)
             continue
+    
+    # Show completion message
+    completed_count = len([v for v in videos])
+    st.success(f"Batch processing completed! {completed_count} videos processed.")
+    st.info("💡 Check your **History** page to review all processed videos and re-download content anytime!")
 
 # ==================== MAIN ENTRY POINT ====================
 
 def main():
-    """Main entry point"""
+    """Main entry point with enhanced persistence"""
     st.set_page_config(
         page_title="YouTube Transcript Processor",
         page_icon="🎬",
