@@ -1028,7 +1028,7 @@ class ImprovedAssemblyAITranscriptProvider(TranscriptProvider):
 
 class LLMProvider:
     """Base class for LLM providers"""
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
         raise NotImplementedError
 
 class DeepSeekProvider(LLMProvider):
@@ -1043,22 +1043,22 @@ class DeepSeekProvider(LLMProvider):
             overlap_length=200      # Context preservation
         )
     
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
         """Enhanced transcript structuring with executive summary and detailed content"""
         try:
             # Generate both executive summary and detailed structured transcript
-            return self._process_transcript_with_summary(transcript, system_prompt)
+            return self._process_transcript_with_summary(transcript, system_prompt, language)
                 
         except Exception as e:
             raise RuntimeError(f"DeepSeek processing error: {str(e)}")
     
-    def _process_transcript_with_summary(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+    def _process_transcript_with_summary(self, transcript: str, system_prompt: str, language: str) -> Optional[Dict[str, str]]:
         """Process transcript to generate both executive summary and detailed structure"""
         
         # Step 1: Generate Executive Summary
         st.info("Step 1: Generating executive summary...")
-        summary_prompt = self._create_summary_prompt(system_prompt)
-        executive_summary = self._process_for_summary(transcript, summary_prompt)
+        summary_prompt = self._create_summary_prompt(language)
+        executive_summary = self._process_for_summary(transcript, summary_prompt, language)
         
         if not executive_summary:
             st.error("Failed to generate executive summary")
@@ -1066,7 +1066,7 @@ class DeepSeekProvider(LLMProvider):
         
         # Step 2: Generate Detailed Structured Transcript
         st.info("Step 2: Generating detailed structured transcript...")
-        detailed_transcript = self._process_for_detailed_structure(transcript, system_prompt)
+        detailed_transcript = self._process_for_detailed_structure(transcript, system_prompt, language)
         
         if not detailed_transcript:
             st.error("Failed to generate detailed transcript")
@@ -1077,10 +1077,10 @@ class DeepSeekProvider(LLMProvider):
             'detailed_transcript': detailed_transcript
         }
     
-    def _create_summary_prompt(self, base_prompt: str) -> str:
+    def _create_summary_prompt(self, language: str) -> str:
         """Create a specialized prompt for generating executive summary"""
         
-        if "English" in base_prompt:
+        if language == "English":
             summary_prompt = """You are an expert at creating concise executive summaries from YouTube video transcripts.
 
 Your task is to create a comprehensive EXECUTIVE SUMMARY that captures the key points, main ideas, and essential information from the transcript.
@@ -1126,17 +1126,17 @@ Format using markdown with headers and bullet points for maximum readability."""
         
         return summary_prompt
     
-    def _process_for_summary(self, transcript: str, summary_prompt: str) -> Optional[str]:
+    def _process_for_summary(self, transcript: str, summary_prompt: str, language: str) -> Optional[str]:
         """Process transcript to generate executive summary"""
         
         # For summary, we can handle longer text since we're condensing it
         if self.text_chunker.estimate_tokens(transcript) > 10000:  # ~40k characters
             st.info("Long transcript detected - using intelligent chunking for summary generation...")
-            return self._process_summary_with_chunking(transcript, summary_prompt)
+            return self._process_summary_with_chunking(transcript, summary_prompt, language)
         else:
             return self._make_api_request(transcript, summary_prompt)
     
-    def _process_summary_with_chunking(self, transcript: str, summary_prompt: str) -> Optional[str]:
+    def _process_summary_with_chunking(self, transcript: str, summary_prompt: str, language: str) -> Optional[str]:
         """Process long transcript with chunking for summary generation"""
         
         # Create larger chunks for summary since we're condensing
@@ -1173,7 +1173,7 @@ Focus on summarizing the key points from THIS specific chunk.
         
         combined_summaries = "\n\n".join(chunk_summaries)
         
-        if "English" in summary_prompt:
+        if language == "English":
             final_summary_prompt = """You are an expert at synthesizing multiple summary chunks into a single, coherent executive summary.
 
 Below are summary chunks from different parts of a video transcript. Your task is to:
@@ -1201,7 +1201,7 @@ Create a polished, professional executive summary that flows naturally."""
         
         return self._make_api_request(combined_summaries, final_summary_prompt)
     
-    def _process_for_detailed_structure(self, transcript: str, system_prompt: str) -> Optional[str]:
+    def _process_for_detailed_structure(self, transcript: str, system_prompt: str, language: str) -> Optional[str]:
         """Process transcript for detailed structure"""
         
         # Determine if chunking is needed
@@ -1210,9 +1210,9 @@ Create a polished, professional executive summary that flows naturally."""
             return self._make_api_request(transcript, system_prompt)
         else:
             # Process with intelligent chunking
-            return self._process_detailed_with_chunking(transcript, system_prompt)
+            return self._process_detailed_with_chunking(transcript, system_prompt, language)
     
-    def _process_detailed_with_chunking(self, transcript: str, system_prompt: str) -> Optional[str]:
+    def _process_detailed_with_chunking(self, transcript: str, system_prompt: str, language: str) -> Optional[str]:
         """Process long transcript with intelligent chunking for detailed structure"""
         # Create intelligent chunks
         chunks = self.text_chunker.create_intelligent_chunks(transcript)
@@ -1224,9 +1224,6 @@ Create a polished, professional executive summary that flows naturally."""
         
         # Process chunks in sequence (not parallel to maintain order)
         processed_chunks = []
-        
-        # Extract language from system prompt for chunk-specific instructions
-        language = "English" if "English" in system_prompt else "中文"
         
         for i, chunk_info in enumerate(chunks):
             st.info(f"Processing detailed chunk {i+1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
@@ -1488,10 +1485,10 @@ class TranscriptOrchestrator:
             
         return transcript
     
-    def structure_transcript(self, transcript: str, system_prompt: str) -> Optional[Dict[str, str]]:
+    def structure_transcript(self, transcript: str, system_prompt: str, language: str = "English") -> Optional[Dict[str, str]]:
         if not self.llm_provider:
             return None
-        return self.llm_provider.structure_transcript(transcript, system_prompt)
+        return self.llm_provider.structure_transcript(transcript, system_prompt, language)
 
 # ==================== STREAMLIT UI ====================
 
@@ -2140,7 +2137,7 @@ def process_videos_with_history(videos, language, use_asr_fallback, system_promp
             
             # Step 2: Structure transcript with executive summary
             with st.spinner("Generating executive summary and structuring transcript with LLM..."):
-                result = orchestrator.structure_transcript(transcript, system_prompt)
+                result = orchestrator.structure_transcript(transcript, system_prompt, language)
             
             if not result:
                 st.error("Failed to structure transcript")
