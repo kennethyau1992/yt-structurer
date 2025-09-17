@@ -2086,38 +2086,52 @@ def main_app():
         st.write(f"Welcome, **{st.session_state.username}**!")
         st.divider()
         
-        # Navigation
+        # Navigation - only update if not on a detail page
         page_options = ["🎬 Process Videos", "📚 History", "⚙️ Settings"]
         current_index = 0
         
-        # Map current page to index
-        if st.session_state.current_page == "history" or st.session_state.current_page == "history_detail":
+        # Map current page to index, treating detail pages as their parent
+        if st.session_state.current_page in ["history", "history_detail"]:
             current_index = 1
         elif st.session_state.current_page == "settings":
             current_index = 2
         
-        page = st.radio(
-            "Navigation",
-            page_options,
-            index=current_index,
-            key="navigation"
-        )
-        
-        # Update current page based on navigation
-        if page == "🎬 Process Videos":
-            st.session_state.current_page = "main"
-        elif page == "📚 History":
-            st.session_state.current_page = "history"
-        elif page == "⚙️ Settings":
-            st.session_state.current_page = "settings"
+        # Only process radio button changes if we're not on a detail page
+        if st.session_state.current_page != "history_detail":
+            page = st.radio(
+                "Navigation",
+                page_options,
+                index=current_index,
+                key="navigation"
+            )
+            
+            # Update current page based on navigation
+            if page == "🎬 Process Videos":
+                st.session_state.current_page = "main"
+            elif page == "📚 History":
+                st.session_state.current_page = "history"
+            elif page == "⚙️ Settings":
+                st.session_state.current_page = "settings"
+        else:
+            # Show navigation but don't allow changes when on detail page
+            st.radio(
+                "Navigation",
+                page_options,
+                index=current_index,
+                disabled=True,
+                help="Return to History to change navigation"
+            )
         
         st.divider()
         
         # Quick stats
         if 'user_data_manager' in st.session_state:
-            stats = st.session_state.user_data_manager.get_history_statistics(st.session_state.username)
-            st.metric("Videos Processed", stats["total_videos"])
-            st.metric("Total Characters", f"{stats['total_transcript_length']:,}")
+            try:
+                stats = st.session_state.user_data_manager.get_history_statistics(st.session_state.username)
+                st.metric("Videos Processed", stats["total_videos"])
+                st.metric("Total Characters", f"{stats['total_transcript_length']:,}")
+            except Exception as e:
+                st.caption("Stats unavailable")
         
         st.divider()
         
