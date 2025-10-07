@@ -1866,32 +1866,32 @@ def show_main_processing_page():
     
     st.header("Configuration")
     
-with st.expander("API Status", expanded=True):
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        if api_keys.get('supadata'):
-            st.success("Supadata ✅")
-        else:
-            st.error("Supadata ❌")
-    
-    with col2:
-        if api_keys.get('assemblyai'):
-            st.success("AssemblyAI ✅")
-        else:
-            st.error("AssemblyAI ❌")
-    
-    with col3:
-        if api_keys.get('deepseek'):
-            st.success("DeepSeek ✅")
-        else:
-            st.error("DeepSeek ❌")
-    
-    with col4:
-        if api_keys.get('youtube'):
-            st.success("YouTube ✅")
-        else:
-            st.error("YouTube ❌")
+    with st.expander("API Status", expanded=True):
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            if api_keys.get('supadata'):
+                st.success("Supadata ✅")
+            else:
+                st.error("Supadata ❌")
+        
+        with col2:
+            if api_keys.get('assemblyai'):
+                st.success("AssemblyAI ✅")
+            else:
+                st.error("AssemblyAI ❌")
+        
+        with col3:
+            if api_keys.get('deepseek'):
+                st.success("DeepSeek ✅")
+            else:
+                st.error("DeepSeek ❌")
+        
+        with col4:
+            if api_keys.get('youtube'):
+                st.success("YouTube ✅")
+            else:
+                st.error("YouTube ❌")
     
     with st.expander("Settings"):
         col1, col2 = st.columns(2)
