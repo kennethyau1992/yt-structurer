@@ -2052,13 +2052,21 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             
             data_manager.update_history_entry(username, entry_id, history_entry)
             
-            st.success("🎉 Done!")
-            
-            if result.get('detailed_transcript'):
-                with st.expander("📝 Transcript", expanded=False):
-                    st.markdown(result['detailed_transcript'])
-            
-            col1, col2 = st.columns(2)
+st.success("🎉 Done!")
+
+# Show executive summary if available
+if result.get('executive_summary'):
+    st.subheader("📋 Executive Summary")
+    st.markdown(result['executive_summary'])
+    st.divider()
+
+# Show detailed transcript
+if result.get('detailed_transcript'):
+    st.subheader("📝 Detailed Structured Transcript")
+    st.markdown(result['detailed_transcript'])
+    st.divider()
+
+col1, col2 = st.columns(2)
             with col1:
                 if result.get('executive_summary'):
                     st.download_button(
