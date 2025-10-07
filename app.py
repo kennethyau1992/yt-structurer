@@ -1984,6 +1984,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
     username = st.session_state.username
     data_manager = get_data_manager()
     
+    # Initialize providers
     supadata = OptimizedSupadataProvider(api_keys.get('supadata', ''))
     assemblyai = OptimizedAssemblyAIProvider(api_keys.get('assemblyai', ''), browser) if use_asr else None
     deepseek = OptimizedDeepSeekProvider(
@@ -2016,6 +2017,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
         entry_id = history_entry.get('id')
         
         try:
+            # Get transcript
             if video.get("type") == "direct_transcript":
                 transcript = video.get("transcript", "")
             else:
@@ -2028,6 +2030,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             history_entry["transcript_length"] = len(transcript)
             data_manager.update_history_entry(username, entry_id, history_entry)
             
+            # Structure transcript
             with st.spinner("Structuring..."):
                 summary_placeholder = st.empty()
                 
@@ -2044,6 +2047,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             if not result:
                 raise Exception("Failed to structure")
             
+            # Update history with results
             processing_time = time.time() - start_time
             history_entry["processing_time"] = f"{processing_time:.1f}s"
             history_entry["status"] = "Completed"
@@ -2052,45 +2056,84 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             
             data_manager.update_history_entry(username, entry_id, history_entry)
             
-st.success("🎉 Done!")
-
-# Show executive summary if available
-if result.get('executive_summary'):
-    st.subheader("📋 Executive Summary")
-    st.markdown(result['executive_summary'])
-    st.divider()
-
-# Show detailed transcript
-if result.get('detailed_transcript'):
-    st.subheader("📝 Detailed Structured Transcript")
-    st.markdown(result['detailed_transcript'])
-    st.divider()
-
-col1, col2 = st.columns(2)
+            # Display success message
+            st.success("🎉 Processing Complete!")
+            st.divider()
+            
+            # Display Executive Summary
+            if result.get('executive_summary'):
+                st.subheader("📋 Executive Summary")
+                st.markdown(result['executive_summary'])
+                st.divider()
+            
+            # Display Detailed Transcript
+            if result.get('detailed_transcript'):
+                st.subheader("📝 Detailed Structured Transcript")
+                st.markdown(result['detailed_transcript'])
+                st.divider()
+            else:
+                st.warning("⚠️ No detailed transcript was generated")
+            
+            # Download buttons
+            st.subheader("💾 Downloads")
+            col1, col2, col3 = st.columns(3)
+            
             with col1:
                 if result.get('executive_summary'):
                     st.download_button(
-                        "Download Summary",
+                        "📄 Download Summary",
                         result['executive_summary'],
-                        file_name=f"summary_{entry_id}.md"
+                        file_name=f"summary_{entry_id}.md",
+                        mime="text/markdown",
+                        key=f"download_summary_{entry_id}"
                     )
+            
             with col2:
                 if result.get('detailed_transcript'):
                     st.download_button(
-                        "Download Transcript",
+                        "📄 Download Transcript",
                         result['detailed_transcript'],
-                        file_name=f"transcript_{entry_id}.md"
+                        file_name=f"transcript_{entry_id}.md",
+                        mime="text/markdown",
+                        key=f"download_transcript_{entry_id}"
+                    )
+            
+            with col3:
+                if result.get('executive_summary') and result.get('detailed_transcript'):
+                    combined = f"""# {video['title']}
+
+## Executive Summary
+
+{result['executive_summary']}
+
+---
+
+## Detailed Transcript
+
+{result['detailed_transcript']}
+"""
+                    st.download_button(
+                        "📦 Download Complete",
+                        combined,
+                        file_name=f"complete_{entry_id}.md",
+                        mime="text/markdown",
+                        key=f"download_complete_{entry_id}"
                     )
             
             st.divider()
             
         except Exception as e:
-            st.error(f"Error: {e}")
+            # Handle any errors during processing
+            st.error(f"❌ Error: {str(e)}")
+            
             processing_time = time.time() - start_time
             history_entry["processing_time"] = f"{processing_time:.1f}s"
             history_entry["status"] = "Failed"
             history_entry["error"] = str(e)
             data_manager.update_history_entry(username, entry_id, history_entry)
+            
+            st.divider()
+            continue
 
 def main_app():
     """Main app"""
