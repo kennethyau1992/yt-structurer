@@ -8,9 +8,6 @@ import gzip
 import base64
 import secrets
 import functools
-import asyncio
-import aiohttp
-import bcrypt
 import concurrent.futures
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Any
@@ -23,6 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+import bcrypt
 import streamlit as st
 
 # ==================== DATABASE MANAGER ====================
@@ -137,7 +135,7 @@ class DatabaseManager:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_history_status ON history(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_history_search ON history(video_title, video_channel)")
             
-            # Create default admin user if not exists
+            # Create default admin user
             self._create_default_admin()
     
     def _create_default_admin(self):
@@ -145,7 +143,6 @@ class DatabaseManager:
         with self.get_connection() as conn:
             result = conn.execute("SELECT 1 FROM users WHERE username = 'admin'").fetchone()
             if not result:
-                # Use bcrypt for password hashing
                 salt = bcrypt.gensalt(rounds=12)
                 password_hash = bcrypt.hashpw("admin123".encode('utf-8'), salt).decode('utf-8')
                 
@@ -154,7 +151,6 @@ class DatabaseManager:
                     ("admin", password_hash)
                 )
                 
-                # Add API keys from environment
                 api_keys = {
                     'supadata': os.getenv("ADMIN_SUPADATA_KEY", ""),
                     'assemblyai': os.getenv("ADMIN_ASSEMBLYAI_KEY", ""),
@@ -169,17 +165,17 @@ class DatabaseManager:
                             ("admin", service, key)
                         )
 
-# ==================== HTTP CLIENT WITH CONNECTION POOLING ====================
+# ==================== HTTP CLIENT ====================
 
 class OptimizedHTTPClient:
-    """HTTP client with connection pooling and retry logic"""
+    """HTTP client with connection pooling"""
     
     _session = None
     _lock = threading.Lock()
     
     @classmethod
     def get_session(cls):
-        """Get singleton session with connection pooling"""
+        """Get singleton session"""
         if cls._session is None:
             with cls._lock:
                 if cls._session is None:
@@ -207,9 +203,8 @@ class OptimizedHTTPClient:
 # ==================== YOUTUBE INFO EXTRACTOR ====================
 
 class OptimizedYouTubeInfoExtractor:
-    """Optimized YouTube info extractor with caching"""
+    """Optimized YouTube info extractor"""
     
-    # Pre-compiled regex patterns
     _patterns = [
         re.compile(r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/)([^&\n?#]+)'),
         re.compile(r'youtube\.com/v/([^&\n?#]+)')
@@ -316,7 +311,7 @@ class OptimizedYouTubeInfoExtractor:
 # ==================== USER DATA MANAGER ====================
 
 class OptimizedUserDataManager:
-    """Optimized user data manager using SQLite"""
+    """Optimized user data manager"""
     
     def __init__(self, db: DatabaseManager):
         self.db = db
@@ -374,26 +369,23 @@ class OptimizedUserDataManager:
     
     @staticmethod
     def _compress(text: str) -> bytes:
-        """Compress text for storage"""
         if not text:
             return b''
         return gzip.compress(text.encode('utf-8'))
     
     @staticmethod
     def _decompress(data: bytes) -> str:
-        """Decompress text from storage"""
         if not data:
             return ''
         return gzip.decompress(data).decode('utf-8')
     
     def add_to_history(self, username: str, entry: Dict):
-        """Optimized history insertion with compression"""
+        """Optimized history insertion"""
         if 'id' not in entry:
             entry['id'] = hashlib.md5(
                 f"{entry.get('url', '')}_{datetime.now().isoformat()}".encode()
             ).hexdigest()[:8]
         
-        # Enhance with YouTube info if available
         if self.youtube_extractor and entry.get('url') and entry.get('input_type', 'url') == 'url':
             video_info = self.youtube_extractor.get_video_info(entry['url'])
             entry.update({
@@ -517,7 +509,7 @@ class OptimizedUserDataManager:
             return [dict(row) for row in results]
     
     def get_history_entry_full(self, username: str, entry_id: str) -> Optional[Dict]:
-        """Get full entry including transcripts"""
+        """Get full entry"""
         with self.db.get_connection() as conn:
             result = conn.execute("""
                 SELECT h.*, 
@@ -535,7 +527,7 @@ class OptimizedUserDataManager:
             return None
     
     def get_history_statistics(self, username: str) -> Dict:
-        """Optimized statistics with aggregation"""
+        """Optimized statistics"""
         with self.db.get_connection() as conn:
             stats = conn.execute("""
                 SELECT 
@@ -575,7 +567,7 @@ class OptimizedUserDataManager:
             }
     
     def delete_history_entry(self, username: str, entry_id: str):
-        """Cascade delete"""
+        """Delete entry"""
         with self.db.get_connection() as conn:
             conn.execute(
                 "DELETE FROM history WHERE username = ? AND id = ?",
@@ -583,14 +575,14 @@ class OptimizedUserDataManager:
             )
     
     def clear_user_history(self, username: str):
-        """Efficient bulk delete"""
+        """Clear all history"""
         with self.db.get_connection() as conn:
             conn.execute("DELETE FROM history WHERE username = ?", (username,))
 
-# ==================== AUTHENTICATION MANAGER ====================
+# ==================== AUTHENTICATION ====================
 
 class SecureAuthManager:
-    """Secure authentication with bcrypt and sessions"""
+    """Secure authentication"""
     
     def __init__(self, db: DatabaseManager):
         self.db = db
@@ -600,7 +592,7 @@ class SecureAuthManager:
         self._load_users_from_env()
     
     def _load_users_from_env(self):
-        """Load additional users from environment variables"""
+        """Load users from environment"""
         env_users = {}
         
         for key, value in os.environ.items():
@@ -638,7 +630,6 @@ class SecureAuthManager:
                     env_users[username] = {"api_keys": {}}
                 env_users[username]["api_keys"]["youtube"] = value
         
-        # Add users to database
         with self.db.get_connection() as conn:
             for username, user_data in env_users.items():
                 try:
@@ -657,7 +648,7 @@ class SecureAuthManager:
                     pass
     
     def is_account_locked(self, username: str) -> tuple[bool, int]:
-        """Check if account is locked, return (is_locked, minutes_remaining)"""
+        """Check if locked"""
         if username in self.failed_attempts:
             count, last_attempt = self.failed_attempts[username]
             if count >= self.MAX_FAILED_ATTEMPTS:
@@ -671,7 +662,7 @@ class SecureAuthManager:
         return False, 0
     
     def authenticate(self, username: str, password: str) -> tuple[bool, Optional[str]]:
-        """Authenticate with security features"""
+        """Authenticate user"""
         is_locked, minutes = self.is_account_locked(username)
         if is_locked:
             return False, f"Account locked. Try again in {minutes} minutes."
@@ -696,7 +687,6 @@ class SecureAuthManager:
                         del self.failed_attempts[username]
                     return True, None
             
-            # Failed attempt
             if username not in self.failed_attempts:
                 self.failed_attempts[username] = (1, datetime.now())
             else:
@@ -707,10 +697,10 @@ class SecureAuthManager:
             if remaining > 0:
                 return False, f"Invalid credentials. {remaining} attempts remaining."
             else:
-                return False, "Account locked due to too many failed attempts."
+                return False, "Account locked."
     
     def get_user_api_keys(self, username: str) -> Dict[str, str]:
-        """Get user API keys"""
+        """Get API keys"""
         with self.db.get_connection() as conn:
             results = conn.execute(
                 "SELECT service, api_key FROM api_keys WHERE username = ?",
@@ -719,39 +709,10 @@ class SecureAuthManager:
             
             return {row['service']: row['api_key'] for row in results}
 
-# ==================== YOUTUBE COOKIE MANAGER ====================
-
-class YouTubeCookieManager:
-    """Manages YouTube cookies for yt-dlp"""
-    
-    @staticmethod
-    def get_ydl_opts(use_cookies: bool = True, browser: str = 'chrome') -> dict:
-        """Get yt-dlp options with cookie configuration"""
-        base_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
-        
-        if use_cookies:
-            render_cookies = '/etc/secrets/youtube_cookies.txt'
-            if os.path.exists(render_cookies):
-                base_opts['cookiefile'] = render_cookies
-            else:
-                env_cookies = os.getenv('YOUTUBE_COOKIES_FILE')
-                if env_cookies and os.path.exists(env_cookies):
-                    base_opts['cookiefile'] = env_cookies
-        
-        base_opts['headers'] = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        return base_opts
-
-# ==================== OPTIMIZED CHUNKER ====================
+# ==================== CHUNKER ====================
 
 class OptimizedPerformanceChunker:
-    """High-performance chunking with pre-compiled patterns"""
+    """High-performance chunking"""
     
     SECTION_BREAK = re.compile(r'\n\s*\n')
     SENTENCE_END = re.compile(r'[.!?]\s+')
@@ -798,34 +759,20 @@ class OptimizedPerformanceChunker:
             return text_length > 30000
     
     def prepare_text_for_summary(self, text: str) -> str:
-        """Prepare text for summary with smart truncation"""
+        """Prepare text for summary"""
         truncate_length = self.config.get("summary_truncate_length")
         
         if truncate_length and len(text) > truncate_length:
             beginning = text[:truncate_length // 2]
             end = text[-(truncate_length // 2):]
-            
-            beginning_break = beginning.rfind('\n\n')
-            if beginning_break == -1:
-                beginning_break = beginning.rfind('. ')
-            if beginning_break > truncate_length // 3:
-                beginning = beginning[:beginning_break + 2]
-            
-            end_break = end.find('\n\n')
-            if end_break == -1:
-                end_break = end.find('. ')
-            if end_break != -1 and end_break < len(end) // 3:
-                end = end[end_break + 2:]
-            
-            return beginning + "\n\n[... content truncated for speed ...]\n\n" + end
+            return beginning + "\n\n[... truncated ...]\n\n" + end
         
         return text
     
     @functools.lru_cache(maxsize=100)
     def _find_split_points_cached(self, text_hash: str, text: str) -> tuple:
-        """Cache split point calculation"""
+        """Cache split points"""
         split_points = set()
-        
         split_points.update(m.end() for m in self.SECTION_BREAK.finditer(text))
         
         if len(split_points) < 20:
@@ -837,7 +784,7 @@ class OptimizedPerformanceChunker:
         return tuple(sorted(split_points))
     
     def create_intelligent_chunks(self, text: str) -> List[Dict[str, Any]]:
-        """Optimized chunking with caching"""
+        """Create chunks"""
         if not self.should_chunk_text(text):
             return [{
                 'chunk_id': 0,
@@ -898,7 +845,7 @@ class OptimizedPerformanceChunker:
     
     @staticmethod
     def _find_best_split_binary(split_points: tuple, min_pos: int, max_pos: int) -> Optional[int]:
-        """Binary search for best split point"""
+        """Binary search"""
         import bisect
         
         idx = bisect.bisect_left(split_points, max_pos)
@@ -913,52 +860,37 @@ class OptimizedPerformanceChunker:
     
     def create_chunk_specific_prompt(self, base_prompt: str, chunk_info: Dict, 
                                     total_chunks: int, language: str) -> str:
-        """Create context-aware prompt"""
+        """Create prompt for chunk"""
         chunk_id = chunk_info['chunk_id']
         is_first = chunk_id == 0
         is_last = chunk_info.get('is_final_chunk', False)
         
-        context_info = f"This is chunk {chunk_id + 1} of {total_chunks} from a longer transcript."
+        context_info = f"This is chunk {chunk_id + 1} of {total_chunks}."
         
         if is_first:
-            context_info += " This is the BEGINNING of the transcript."
+            context_info += " This is the BEGINNING."
         elif is_last:
-            context_info += " This is the FINAL chunk of the transcript."
+            context_info += " This is the FINAL chunk."
         else:
-            context_info += " This is a MIDDLE section of the transcript."
+            context_info += " This is a MIDDLE section."
         
         if language == "繁體中文" or language == "中文":
-            chunk_instruction = f"""
-{base_prompt}
-
-**重要提示：**
-{context_info}
-請處理此部分內容，保持與整體文檔的連貫性。
-"""
+            return f"{base_prompt}\n\n**重要提示：** {context_info}"
         else:
-            chunk_instruction = f"""
-{base_prompt}
-
-**IMPORTANT CONTEXT:**
-{context_info}
-Process this section while maintaining coherence with the overall document.
-"""
-        
-        return chunk_instruction
+            return f"{base_prompt}\n\n**CONTEXT:** {context_info}"
 
 # ==================== LANGUAGE DETECTOR ====================
 
 class LanguageDetector:
-    """Optimized language detection"""
+    """Language detection"""
     
     @staticmethod
     @functools.lru_cache(maxsize=500)
     def detect_language(text_sample: str) -> str:
-        """Cached language detection"""
+        """Detect language"""
         if not text_sample or len(text_sample.strip()) < 10:
             return "English"
         
-        # Sample first 2000 chars for performance
         sample = text_sample[:2000]
         
         chinese_chars = sum(1 for c in sample if '\u4e00' <= c <= '\u9fff')
@@ -974,7 +906,7 @@ class LanguageDetector:
     
     @staticmethod
     def get_language_code(language: str) -> str:
-        """Convert language name to code"""
+        """Get code"""
         if language == "Chinese":
             return "繁體中文"
         else:
@@ -983,13 +915,10 @@ class LanguageDetector:
 # ==================== YOUTUBE AUDIO EXTRACTOR ====================
 
 class YouTubeAudioExtractor:
-    """Extract audio URLs from YouTube"""
-    
-    def __init__(self):
-        self.cookie_manager = YouTubeCookieManager()
+    """Extract audio URLs"""
     
     def extract_audio_url(self, youtube_url: str, browser: str = 'chrome') -> Optional[str]:
-        """Extract direct audio URL"""
+        """Extract audio URL"""
         try:
             import yt_dlp
             
@@ -1037,12 +966,12 @@ class YouTubeAudioExtractor:
 # ==================== TRANSCRIPT PROVIDERS ====================
 
 class TranscriptProvider:
-    """Base class for transcript providers"""
+    """Base provider"""
     def get_transcript(self, url: str, language: str) -> Optional[str]:
         raise NotImplementedError
 
 class OptimizedSupadataProvider(TranscriptProvider):
-    """Optimized Supadata provider"""
+    """Supadata provider"""
     
     def __init__(self, api_key: str):
         try:
@@ -1067,16 +996,8 @@ class OptimizedSupadataProvider(TranscriptProvider):
             st.error(f"Supadata error: {e}")
             return None
     
-    @staticmethod
-    @functools.lru_cache(maxsize=100)
-    def _normalize_transcript_cached(resp_str: str) -> str:
-        """Cached normalization"""
-        if "BatchJob" in resp_str or "job_id" in resp_str:
-            return ""
-        return resp_str
-    
     def _normalize_transcript(self, resp) -> str:
-        """Normalize various response formats"""
+        """Normalize response"""
         if resp is None:
             return ""
         
@@ -1085,7 +1006,9 @@ class OptimizedSupadataProvider(TranscriptProvider):
             return ""
 
         if isinstance(resp, str):
-            return self._normalize_transcript_cached(resp)
+            if "BatchJob" in resp or "job_id" in resp:
+                return ""
+            return resp
 
         if isinstance(resp, dict):
             if resp.get("status") == "processing" or resp.get("job_id"):
@@ -1114,7 +1037,7 @@ class OptimizedSupadataProvider(TranscriptProvider):
         return str(resp) if "BatchJob" not in str(resp) else ""
 
 class OptimizedAssemblyAIProvider(TranscriptProvider):
-    """Optimized AssemblyAI provider with circuit breaker"""
+    """AssemblyAI provider"""
     
     def __init__(self, api_key: str, browser: str = 'chrome'):
         self.api_key = api_key
@@ -1129,7 +1052,7 @@ class OptimizedAssemblyAIProvider(TranscriptProvider):
         self.CIRCUIT_TIMEOUT = timedelta(minutes=5)
     
     def is_circuit_open(self) -> bool:
-        """Check circuit breaker"""
+        """Check circuit"""
         if self.circuit_open:
             if datetime.now() - self.circuit_open_time > self.CIRCUIT_TIMEOUT:
                 self.circuit_open = False
@@ -1139,7 +1062,7 @@ class OptimizedAssemblyAIProvider(TranscriptProvider):
         return False
     
     def get_transcript(self, url: str, language: str) -> Optional[str]:
-        """Get transcript with circuit breaker"""
+        """Get transcript"""
         if self.is_circuit_open():
             st.error("AssemblyAI temporarily unavailable")
             return None
@@ -1160,7 +1083,7 @@ class OptimizedAssemblyAIProvider(TranscriptProvider):
             return None
     
     def _handle_failure(self):
-        """Handle failure and update circuit breaker"""
+        """Handle failure"""
         self.consecutive_failures += 1
         
         if self.consecutive_failures >= self.MAX_FAILURES:
@@ -1168,7 +1091,7 @@ class OptimizedAssemblyAIProvider(TranscriptProvider):
             self.circuit_open_time = datetime.now()
     
     def _transcribe_standard(self, url: str, language: str) -> Optional[str]:
-        """Standard transcription"""
+        """Transcribe"""
         audio_url = self.audio_extractor.extract_audio_url(url, self.browser)
         
         if not audio_url:
@@ -1244,15 +1167,8 @@ class OptimizedAssemblyAIProvider(TranscriptProvider):
 
 # ==================== LLM PROVIDER ====================
 
-@dataclass
-class ProcessedChunk:
-    """Memory-efficient chunk result"""
-    chunk_id: int
-    result: Optional[str]
-    processing_time: float
-
 class OptimizedDeepSeekProvider:
-    """Optimized DeepSeek provider with async support"""
+    """DeepSeek provider"""
     
     def __init__(self, api_key: str, base_url: str, model: str, 
                  temperature: float, performance_mode: str = "balanced"):
@@ -1270,7 +1186,7 @@ class OptimizedDeepSeekProvider:
                                               ui_language: str = "English",
                                               is_custom_prompt: bool = False,
                                               progress_callback=None) -> Optional[Dict[str, str]]:
-        """Process transcript with optimizations"""
+        """Process transcript"""
         detected_language = self.language_detector.detect_language(transcript)
         actual_language = self.language_detector.get_language_code(detected_language)
         
@@ -1289,14 +1205,14 @@ class OptimizedDeepSeekProvider:
     def _process_with_parallel_strategy(self, transcript: str, system_prompt: str,
                                        language: str, is_custom_prompt: bool,
                                        progress_callback) -> Optional[Dict[str, str]]:
-        """Parallel processing for speed mode"""
+        """Parallel processing"""
         summary_transcript = self.text_chunker.prepare_text_for_summary(transcript)
         
         summary_prompt = self._create_summary_prompt(language)
         adapted_prompt = self._adapt_system_prompt_to_language(system_prompt, language, is_custom_prompt)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            st.info("⚡ Starting parallel processing...")
+            st.info("⚡ Parallel processing...")
             
             summary_future = executor.submit(
                 self._process_for_summary, summary_transcript, summary_prompt, language
@@ -1332,14 +1248,14 @@ class OptimizedDeepSeekProvider:
                                          language: str, is_custom_prompt: bool,
                                          progress_callback) -> Optional[Dict[str, str]]:
         """Sequential processing"""
-        st.info("Step 1: Generating executive summary...")
+        st.info("Step 1: Executive summary...")
         summary_prompt = self._create_summary_prompt(language)
         executive_summary = self._process_for_summary(transcript, summary_prompt, language)
         
         if executive_summary and progress_callback:
             progress_callback("executive_summary", executive_summary)
         
-        st.info("Step 2: Generating detailed transcript...")
+        st.info("Step 2: Detailed transcript...")
         adapted_prompt = self._adapt_system_prompt_to_language(system_prompt, language, is_custom_prompt)
         detailed_transcript = self._process_for_detailed_structure(transcript, adapted_prompt, language)
         
@@ -1356,7 +1272,7 @@ class OptimizedDeepSeekProvider:
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def _make_api_request(self, text: str, system_prompt: str) -> Optional[str]:
-        """API request with retry"""
+        """API request"""
         endpoint = self.base_url + "/chat/completions"
         headers = {
             "Content-Type": "application/json",
@@ -1384,7 +1300,7 @@ class OptimizedDeepSeekProvider:
         data = resp.json()
         
         if 'choices' not in data or len(data['choices']) == 0:
-            raise RuntimeError("No choices returned")
+            raise RuntimeError("No choices")
         
         return data["choices"][0]["message"]["content"].strip()
     
@@ -1398,11 +1314,11 @@ class OptimizedDeepSeekProvider:
     
     def _process_summary_with_chunking(self, chunks: List[Dict], summary_prompt: str, 
                                       language: str) -> Optional[str]:
-        """Process summary with chunking"""
+        """Summary with chunking"""
         chunk_summaries = []
         
         for i, chunk in enumerate(chunks):
-            chunk_prompt = f"{summary_prompt}\n\nChunk {i+1}/{len(chunks)}: Focus on key points from this section."
+            chunk_prompt = f"{summary_prompt}\n\nChunk {i+1}/{len(chunks)}"
             result = self._make_api_request(chunk['text'], chunk_prompt)
             if result:
                 chunk_summaries.append(result)
@@ -1411,14 +1327,13 @@ class OptimizedDeepSeekProvider:
             return None
         
         combined = "\n\n".join(chunk_summaries)
-        
-        final_prompt = "Combine these summaries into one unified executive summary:" if language == "English" else "將這些摘要合併成一個統一的執行摘要："
+        final_prompt = "Combine into one summary:" if language == "English" else "合併成一個摘要："
         
         return self._make_api_request(combined, final_prompt)
     
     def _process_for_detailed_structure(self, transcript: str, system_prompt: str, 
                                        language: str) -> Optional[str]:
-        """Process detailed structure"""
+        """Detailed structure"""
         if not self.text_chunker.should_chunk_text(transcript):
             return self._make_api_request(transcript, system_prompt)
         else:
@@ -1439,7 +1354,7 @@ class OptimizedDeepSeekProvider:
     
     def _process_chunks_parallel(self, chunks: List[Dict], system_prompt: str, 
                                 language: str) -> Optional[str]:
-        """Parallel chunk processing"""
+        """Parallel chunks"""
         max_workers = self.config["max_parallel_workers"]
         
         def process_chunk(chunk_info):
@@ -1467,11 +1382,11 @@ class OptimizedDeepSeekProvider:
     
     def _process_chunks_sequential(self, chunks: List[Dict], system_prompt: str, 
                                   language: str) -> Optional[str]:
-        """Sequential chunk processing"""
+        """Sequential chunks"""
         results = []
         
         for i, chunk in enumerate(chunks):
-            st.info(f"Processing chunk {i+1}/{len(chunks)}")
+            st.info(f"Chunk {i+1}/{len(chunks)}")
             
             chunk_prompt = self.text_chunker.create_chunk_specific_prompt(
                 system_prompt, chunk, len(chunks), language
@@ -1490,105 +1405,66 @@ class OptimizedDeepSeekProvider:
         return self._combine_processed_chunks(results, language)
     
     def _combine_processed_chunks(self, chunks: List[str], language: str) -> str:
-        """Combine processed chunks"""
+        """Combine chunks"""
         if len(chunks) == 1:
             return chunks[0]
         
         separator = "\n\n---\n\n"
-        header = "# Detailed Structured Transcript\n\n" if language == "English" else "# 詳細結構化轉錄文稿\n\n"
+        header = "# Detailed Transcript\n\n" if language == "English" else "# 詳細轉錄\n\n"
         
         return header + separator.join(chunks)
     
     def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str, 
                                         is_custom_prompt: bool = False) -> str:
-        """Adapt prompt to language"""
+        """Adapt prompt"""
         if is_custom_prompt:
-            language_instruction = "\n\n**Please output in English.**" if detected_language == "English" else "\n\n**請用繁體中文輸出。**"
-            return system_prompt + language_instruction
+            instruction = "\n\n**Output in English.**" if detected_language == "English" else "\n\n**請用繁體中文輸出。**"
+            return system_prompt + instruction
         
         if detected_language == "繁體中文":
-            return """你是一個專業的YouTube影片轉錄文本分析和結構化專家。你的任務是將原始轉錄文本轉換為組織良好、易於閱讀的文檔。
+            return """你是專業的YouTube轉錄專家。請結構化轉錄：
 
-請按照以下指導原則來結構化轉錄文本：
+1. 創建清晰章節
+2. 提高可讀性
+3. 保留所有信息
+4. 使用markdown格式
 
-1. **創建清晰的章節和標題**，基於主題變化和內容流程
-2. **提高可讀性**：
-   - 修正語法和標點符號
-   - 刪除填充詞（嗯、呃、那個、就是說）
-   - 合併斷裂的句子
-   - 添加段落分隔以改善流暢性
-
-3. **保留所有重要信息** - 不要總結或省略內容
-4. **使用markdown格式** 來設置標題、強調和結構
-5. **在自然主題轉換處添加時間戳**
-6. **保持說話者的語調和意思**，同時提高清晰度
-
-將輸出格式化為一個清潔、專業的文檔，便於閱讀和參考。請用繁體中文輸出結構化的轉錄文本。"""
+用繁體中文輸出。"""
         
         else:
-            return """You are an expert at analyzing and structuring YouTube video transcripts. Your task is to convert raw transcript text into a well-organized, readable document.
+            return """You are a YouTube transcript expert. Structure the transcript:
 
-Please structure the transcript following these guidelines:
+1. Create clear sections
+2. Improve readability
+3. Preserve all information
+4. Use markdown formatting
 
-1. **Create clear sections and headings** based on topic changes and content flow
-2. **Improve readability** by:
-   - Fixing grammar and punctuation
-   - Removing filler words (um, uh, like, you know)
-   - Combining fragmented sentences
-   - Adding paragraph breaks for better flow
-
-3. **Preserve all important information** - don't summarize or omit content
-4. **Use markdown formatting** for headers, emphasis, and structure
-5. **Add timestamps** where natural topic transitions occur
-6. **Maintain the speaker's tone and meaning** while improving clarity
-
-Format the output as a clean, professional document that would be easy to read and reference. Please output in English."""
+Output in English."""
     
     def _create_summary_prompt(self, language: str) -> str:
-        """Create summary prompt"""
+        """Summary prompt"""
         if language == "繁體中文":
-            return """你是一個專業的YouTube影片轉錄文本執行摘要專家。
+            return """創建執行摘要：
+1. 概述
+2. 關鍵點
+3. 重要細節
+4. 結論
 
-你的任務是創建一個全面的執行摘要，捕捉轉錄文本中的關鍵點、主要觀點和重要信息。
-
-請按以下結構組織你的執行摘要：
-
-1. **概述** - 簡要2-3句話描述影片內容
-2. **關鍵點** - 討論的主要觀點、論證或話題（使用要點形式）
-3. **重要細節** - 提到的重要事實、統計數據、例子或見解
-4. **結論/要點** - 主要結論、建議或可操作的見解
-
-要求：
-- 保持簡潔但全面（目標300-500字）
-- 使用要點形式便於掃描
-- 捕捉人們需要了解的最重要信息
-- 保持說話者的關鍵信息和語調
-
-請用繁體中文輸出執行摘要。"""
+用繁體中文輸出。"""
         
         else:
-            return """You are an expert at creating concise executive summaries from YouTube video transcripts.
+            return """Create executive summary:
+1. Overview
+2. Key Points
+3. Important Details
+4. Conclusions
 
-Your task is to create a comprehensive EXECUTIVE SUMMARY that captures the key points, main ideas, and essential information from the transcript.
-
-Please structure your executive summary with:
-
-1. **Overview** - A brief 2-3 sentence description of what the video covers
-2. **Key Points** - The main ideas, arguments, or topics discussed (use bullet points)
-3. **Important Details** - Significant facts, statistics, examples, or insights mentioned
-4. **Conclusions/Takeaways** - Main conclusions, recommendations, or actionable insights
-
-Requirements:
-- Keep it concise but comprehensive (aim for 300-500 words)
-- Use bullet points for easy scanning
-- Capture the most important information that someone would need to know
-
-Please output the executive summary in English."""
+Output in English."""
 
 # ==================== YOUTUBE DATA PROVIDER ====================
 
 class YouTubeDataProvider:
-    """Provider for YouTube Data API operations"""
+    """YouTube Data API"""
     
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -1596,7 +1472,7 @@ class YouTubeDataProvider:
         self.available = bool(api_key)
     
     def get_playlist_videos(self, playlist_url: str) -> List[Dict[str, str]]:
-        """Extract videos from playlist"""
+        """Get playlist videos"""
         if not self.available:
             return []
             
@@ -1635,7 +1511,7 @@ class YouTubeDataProvider:
                     resource_id = snippet.get('resourceId', {})
                     
                     video_id = resource_id.get('videoId')
-                    title = snippet.get('title', 'Unknown Title')
+                    title = snippet.get('title', 'Unknown')
                     
                     if video_id:
                         videos.append({
@@ -1654,14 +1530,14 @@ class YouTubeDataProvider:
             return []
     
     def extract_playlist_id(self, url: str) -> Optional[str]:
-        """Extract playlist ID from URL"""
+        """Extract playlist ID"""
         match = re.search(r'list=([\w-]+)', url)
         return match.group(1) if match else None
 
 # ==================== ORCHESTRATOR ====================
 
 class EnhancedTranscriptOrchestrator:
-    """Orchestrator with optimizations"""
+    """Orchestrator"""
     
     def __init__(
         self, 
@@ -1674,30 +1550,24 @@ class EnhancedTranscriptOrchestrator:
         self.llm_provider = llm_provider
     
     def get_transcript(self, url: str, language: str, use_fallback: bool = False) -> Optional[str]:
-        """Get transcript with fallback"""
+        """Get transcript"""
         transcript = self.transcript_provider.get_transcript(url, language)
         
-        def is_valid_transcript(text):
-            if not text:
+        def is_valid(text):
+            if not text or "BatchJob" in str(text):
                 return False
-            if "BatchJob" in str(text) or "job_id" in str(text):
-                return False
-            cleaned = text.strip()
-            if len(cleaned) < 100:
-                return False
-            word_count = len(cleaned.split())
-            if word_count < 20:
+            if len(text.strip()) < 100 or len(text.split()) < 20:
                 return False
             return True
         
-        if not is_valid_transcript(transcript):
+        if not is_valid(transcript):
             transcript = None
         
         if not transcript and use_fallback and self.asr_fallback_provider:
-            st.info("Trying ASR fallback...")
+            st.info("ASR fallback...")
             transcript = self.asr_fallback_provider.get_transcript(url, language)
             
-            if not is_valid_transcript(transcript):
+            if not is_valid(transcript):
                 transcript = None
         
         return transcript
@@ -1717,12 +1587,12 @@ class EnhancedTranscriptOrchestrator:
 
 @st.cache_resource
 def get_database_manager():
-    """Cached database manager"""
+    """Cached DB"""
     return DatabaseManager()
 
 @st.cache_resource
 def get_auth_manager():
-    """Cached auth manager"""
+    """Cached auth"""
     db = get_database_manager()
     return SecureAuthManager(db)
 
@@ -1735,18 +1605,18 @@ def get_data_manager():
 def login_page():
     """Login page"""
     st.title("YouTube Transcript Processor")
-    st.subheader("Login Required")
+    st.subheader("Login")
     
-    st.info("**Default Login:** Username: `admin` | Password: `admin123`")
+    st.info("**Default:** Username: `admin` | Password: `admin123`")
     
     with st.form("login_form"):
         username = st.text_input("Username", value="admin")
         password = st.text_input("Password", type="password")
-        submit_button = st.form_submit_button("Login")
+        submit = st.form_submit_button("Login")
         
-        if submit_button:
+        if submit:
             if not username or not password:
-                st.error("Please enter both username and password")
+                st.error("Enter credentials")
                 return False
             
             auth_manager = get_auth_manager()
@@ -1776,8 +1646,8 @@ def login_page():
     return False
 
 def show_history_page():
-    """Optimized history page with pagination"""
-    st.header("📚 Processing History")
+    """History page"""
+    st.header("📚 History")
     
     username = st.session_state.username
     data_manager = get_data_manager()
@@ -1787,49 +1657,44 @@ def show_history_page():
     if 'history_filters' not in st.session_state:
         st.session_state.history_filters = {}
     
-    # Cached stats
     stats = data_manager.get_history_statistics(username)
     
     if stats["total_videos"] > 0:
-        with st.container():
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Total Videos", stats["total_videos"])
-            with col2:
-                st.metric("Avg Length", f"{stats['average_transcript_length']:,} chars")
-            with col3:
-                languages = ", ".join(stats["languages_used"][:2])
-                st.metric("Languages", languages if languages else "N/A")
-            with col4:
-                st.metric("Success Rate", stats.get("success_rate", "0/0"))
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Videos", stats["total_videos"])
+        with col2:
+            st.metric("Avg Length", f"{stats['average_transcript_length']:,}")
+        with col3:
+            languages = ", ".join(stats["languages_used"][:2])
+            st.metric("Languages", languages if languages else "N/A")
+        with col4:
+            st.metric("Success", stats.get("success_rate", "0/0"))
         
         st.divider()
         
-        # Filters
         col1, col2, col3 = st.columns([2, 1, 1])
         with col1:
-            search = st.text_input("🔍 Search", key="history_search")
+            search = st.text_input("🔍 Search")
             if search != st.session_state.history_filters.get('search', ''):
                 st.session_state.history_filters['search'] = search
                 st.session_state.history_page = 0
         
         with col2:
-            status = st.selectbox("Status", ["All", "Completed", "Failed"], key="status_filter")
+            status = st.selectbox("Status", ["All", "Completed", "Failed"])
             if status != "All":
                 st.session_state.history_filters['status'] = status
             elif 'status' in st.session_state.history_filters:
                 del st.session_state.history_filters['status']
         
         with col3:
-            lang_options = ["All"] + stats["languages_used"]
-            lang = st.selectbox("Language", lang_options, key="lang_filter")
+            lang = st.selectbox("Language", ["All"] + stats["languages_used"])
             if lang != "All":
                 st.session_state.history_filters['language'] = lang
             elif 'language' in st.session_state.history_filters:
                 del st.session_state.history_filters['language']
         
-        # Paginated history
         page_size = 10
         offset = st.session_state.history_page * page_size
         
@@ -1842,40 +1707,38 @@ def show_history_page():
         
         if history_page:
             for entry in history_page:
-                with st.container():
-                    col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                
+                with col1:
+                    st.markdown(f"**{entry.get('video_title', 'Unknown')}**")
+                    if entry.get('video_channel'):
+                        st.caption(f"📺 {entry['video_channel']}")
                     
-                    with col1:
-                        st.markdown(f"**{entry.get('video_title', 'Unknown')}**")
-                        if entry.get('video_channel'):
-                            st.caption(f"📺 {entry['video_channel']}")
-                        
-                        status = entry.get('status', 'Unknown')
-                        if status == 'Completed':
-                            st.success(f"✅ {status}")
-                        elif status == 'Failed':
-                            st.error(f"❌ {status}")
-                        else:
-                            st.info(f"⏳ {status}")
-                    
-                    with col2:
-                        st.write(f"**Date:** {entry.get('timestamp', '')[:10]}")
-                        st.write(f"**Lang:** {entry.get('language', 'N/A')}")
-                    
-                    with col3:
-                        if st.button("👁️ View", key=f"view_{entry.get('id')}", type="primary"):
-                            st.session_state.current_page = "history_detail"
-                            st.session_state.current_entry_id = entry.get('id')
-                            st.rerun()
-                    
-                    with col4:
-                        if st.button("🗑️", key=f"del_{entry.get('id')}", type="secondary"):
-                            data_manager.delete_history_entry(username, entry.get('id'))
-                            st.rerun()
+                    status = entry.get('status', 'Unknown')
+                    if status == 'Completed':
+                        st.success(f"✅ {status}")
+                    elif status == 'Failed':
+                        st.error(f"❌ {status}")
+                    else:
+                        st.info(f"⏳ {status}")
+                
+                with col2:
+                    st.write(f"**Date:** {entry.get('timestamp', '')[:10]}")
+                    st.write(f"**Lang:** {entry.get('language', 'N/A')}")
+                
+                with col3:
+                    if st.button("👁️", key=f"view_{entry.get('id')}", type="primary"):
+                        st.session_state.current_page = "history_detail"
+                        st.session_state.current_entry_id = entry.get('id')
+                        st.rerun()
+                
+                with col4:
+                    if st.button("🗑️", key=f"del_{entry.get('id')}", type="secondary"):
+                        data_manager.delete_history_entry(username, entry.get('id'))
+                        st.rerun()
                 
                 st.divider()
             
-            # Pagination
             col1, col2, col3 = st.columns([1, 2, 1])
             
             with col1:
@@ -1893,14 +1756,14 @@ def show_history_page():
                     st.rerun()
         
         else:
-            st.info("No videos match your filters.")
+            st.info("No videos match filters")
     
     else:
-        st.info("No processing history yet.")
+        st.info("No history yet")
 
 def show_history_detail_page(entry_id: str):
-    """Detail page for history entry"""
-    st.header("🔍 Transcript Details")
+    """Detail page"""
+    st.header("🔍 Details")
     
     username = st.session_state.username
     data_manager = get_data_manager()
@@ -1908,17 +1771,16 @@ def show_history_detail_page(entry_id: str):
     entry = data_manager.get_history_entry_full(username, entry_id)
     
     if not entry:
-        st.error("Entry not found!")
+        st.error("Not found")
         if st.button("← Back"):
             st.session_state.current_page = "history"
             st.rerun()
         return
     
-    if st.button("← Back to History", type="secondary"):
+    if st.button("← Back", type="secondary"):
         st.session_state.current_page = "history"
         st.rerun()
     
-    # Video info
     col1, col2 = st.columns([1, 3])
     
     with col1:
@@ -1929,106 +1791,76 @@ def show_history_detail_page(entry_id: str):
         st.title(entry.get('video_title', 'Unknown'))
         if entry.get('video_channel'):
             st.write(f"**Channel:** {entry['video_channel']}")
-        st.write(f"**Status:** {entry.get('status', 'N/A')}")
-        st.write(f"**Language:** {entry.get('language', 'N/A')}")
+        st.write(f"**Status:** {entry.get('status')}")
     
     st.divider()
     
-    # Results
     if entry.get('status') == 'Completed':
         if entry.get('executive_summary'):
-            st.subheader("📋 Executive Summary")
+            st.subheader("📋 Summary")
             st.markdown(entry['executive_summary'])
             st.download_button(
-                "📄 Download Summary",
+                "Download Summary",
                 entry['executive_summary'],
                 file_name=f"summary_{entry_id}.md"
             )
             st.divider()
         
         if entry.get('detailed_transcript'):
-            st.subheader("📝 Detailed Transcript")
+            st.subheader("📝 Transcript")
             st.markdown(entry['detailed_transcript'])
             st.download_button(
-                "📄 Download Transcript",
+                "Download Transcript",
                 entry['detailed_transcript'],
                 file_name=f"transcript_{entry_id}.md"
             )
     
     elif entry.get('status') == 'Failed':
-        st.error(f"Processing failed: {entry.get('error_message', 'Unknown error')}")
+        st.error(f"Failed: {entry.get('error_message', 'Unknown')}")
 
 def show_settings_page():
     """Settings page"""
-    st.header("⚙️ User Settings")
+    st.header("⚙️ Settings")
     
     username = st.session_state.username
     data_manager = get_data_manager()
     
-    current_settings = data_manager.get_user_settings(username)
+    current = data_manager.get_user_settings(username)
     
-    with st.form("settings_form"):
+    with st.form("settings"):
         col1, col2 = st.columns(2)
         
         with col1:
-            language = st.selectbox(
-                "Default Language",
-                ["English", "中文"],
-                index=0 if current_settings.get("language") == "English" else 1
-            )
-            
-            use_asr = st.checkbox(
-                "Enable ASR Fallback",
-                value=current_settings.get("use_asr_fallback", True)
-            )
-            
-            model = st.selectbox(
-                "DeepSeek Model",
-                ["deepseek-chat", "deepseek-reasoner"],
-                index=0 if current_settings.get("deepseek_model") == "deepseek-chat" else 1
-            )
+            lang = st.selectbox("Language", ["English", "中文"], 
+                              index=0 if current.get("language") == "English" else 1)
+            use_asr = st.checkbox("ASR Fallback", value=current.get("use_asr_fallback", True))
+            model = st.selectbox("Model", ["deepseek-chat", "deepseek-reasoner"],
+                               index=0 if current.get("deepseek_model") == "deepseek-chat" else 1)
         
         with col2:
-            temp = st.slider(
-                "Temperature",
-                0.0, 1.0,
-                current_settings.get("temperature", 0.1),
-                0.1
-            )
-            
-            browser = st.selectbox(
-                "Browser for Cookies",
-                ["none", "chrome", "firefox", "edge", "safari"],
-                index=["none", "chrome", "firefox", "edge", "safari"].index(
-                    current_settings.get("browser_for_cookies", "none")
-                )
-            )
-            
-            perf_mode = st.selectbox(
-                "Performance Mode",
-                ["speed", "balanced", "quality"],
-                index=["speed", "balanced", "quality"].index(
-                    current_settings.get("performance_mode", "balanced")
-                )
-            )
+            temp = st.slider("Temperature", 0.0, 1.0, current.get("temperature", 0.1), 0.1)
+            browser = st.selectbox("Browser", ["none", "chrome", "firefox"],
+                                 index=["none", "chrome", "firefox"].index(current.get("browser_for_cookies", "none")))
+            perf = st.selectbox("Performance", ["speed", "balanced", "quality"],
+                              index=["speed", "balanced", "quality"].index(current.get("performance_mode", "balanced")))
         
-        if st.form_submit_button("💾 Save Settings", type="primary"):
+        if st.form_submit_button("💾 Save", type="primary"):
             new_settings = {
-                "language": language,
+                "language": lang,
                 "use_asr_fallback": use_asr,
                 "deepseek_model": model,
                 "temperature": temp,
                 "browser_for_cookies": browser,
-                "performance_mode": perf_mode
+                "performance_mode": perf
             }
             
             data_manager.save_user_settings(username, new_settings)
             st.session_state.user_settings = new_settings
-            st.success("Settings saved!")
+            st.success("Saved!")
             st.rerun()
 
 def show_main_processing_page():
-    """Main processing page"""
+    """Main page"""
     api_keys = st.session_state.get('api_keys', {})
     user_settings = st.session_state.get('user_settings', {})
     
@@ -2045,122 +1877,97 @@ def show_main_processing_page():
         with col4:
             st.success("YouTube ✅") if api_keys.get('youtube') else st.error("YouTube ❌")
     
-    with st.expander("Processing Settings"):
+    with st.expander("Settings"):
         col1, col2 = st.columns(2)
         
         with col1:
-            language = st.selectbox(
-                "Language",
-                ["English", "中文"],
-                index=0 if user_settings.get("language") == "English" else 1
-            )
-            
-            use_asr = st.checkbox(
-                "Enable ASR Fallback",
-                value=user_settings.get("use_asr_fallback", True)
-            )
-            
-            perf_mode = st.selectbox(
-                "Performance Mode",
-                ["speed", "balanced", "quality"],
-                index=["speed", "balanced", "quality"].index(
-                    user_settings.get("performance_mode", "balanced")
-                )
-            )
+            language = st.selectbox("Language", ["English", "中文"],
+                                  index=0 if user_settings.get("language") == "English" else 1)
+            use_asr = st.checkbox("ASR", value=user_settings.get("use_asr_fallback", True))
+            perf_mode = st.selectbox("Mode", ["speed", "balanced", "quality"],
+                                   index=["speed", "balanced", "quality"].index(user_settings.get("performance_mode", "balanced")))
         
         with col2:
-            model = st.selectbox(
-                "DeepSeek Model",
-                ["deepseek-chat", "deepseek-reasoner"],
-                index=0 if user_settings.get("deepseek_model") == "deepseek-chat" else 1
-            )
-            
-            temp = st.slider("Temperature", 0.0, 1.0, user_settings.get("temperature", 0.1), 0.1)
-            
-            browser = st.selectbox(
-                "Browser",
-                ["none", "chrome", "firefox"],
-                index=["none", "chrome", "firefox"].index(
-                    user_settings.get("browser_for_cookies", "none")
-                )
-            )
+            model = st.selectbox("Model", ["deepseek-chat", "deepseek-reasoner"],
+                               index=0 if user_settings.get("deepseek_model") == "deepseek-chat" else 1)
+            temp = st.slider("Temp", 0.0, 1.0, user_settings.get("temperature", 0.1), 0.1)
+            browser = st.selectbox("Browser", ["none", "chrome", "firefox"],
+                                 index=["none", "chrome", "firefox"].index(user_settings.get("browser_for_cookies", "none")))
     
-    st.header("Process Video")
+    st.header("Process")
     
-    input_method = st.radio(
-        "Input Method",
-        ["Single Video URL", "Direct Transcript Input", "Playlist URL", "Batch URLs"]
-    )
+    input_method = st.radio("Method", ["Single URL", "Direct Input", "Playlist", "Batch"])
     
     videos_to_process = []
     
-    if input_method == "Single Video URL":
-        url = st.text_input("YouTube Video URL")
+    if input_method == "Single URL":
+        url = st.text_input("YouTube URL")
         if url:
-            videos_to_process = [{"title": "Single Video", "url": url, "type": "url"}]
+            videos_to_process = [{"title": "Video", "url": url, "type": "url"}]
     
-    elif input_method == "Direct Transcript Input":
-        title = st.text_input("Transcript Title")
-        text = st.text_area("Paste Transcript", height=300)
+    elif input_method == "Direct Input":
+        title = st.text_input("Title")
+        text = st.text_area("Transcript", height=300)
         
         if text:
-            char_count = len(text)
-            st.metric("Characters", f"{char_count:,}")
+            st.metric("Chars", f"{len(text):,}")
             
             if title and text:
                 videos_to_process = [{
                     "title": title,
-                    "url": f"direct_input_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    "url": f"direct_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                     "type": "direct_transcript",
                     "transcript": text
                 }]
     
-    elif input_method == "Playlist URL":
+    elif input_method == "Playlist":
         playlist_url = st.text_input("Playlist URL")
         if playlist_url and api_keys.get('youtube'):
-            if st.button("Load Playlist"):
+            if st.button("Load"):
                 with st.spinner("Loading..."):
                     provider = YouTubeDataProvider(api_keys['youtube'])
                     videos = provider.get_playlist_videos(playlist_url)
                     if videos:
                         for v in videos:
                             v["type"] = "url"
-                        st.success(f"Loaded {len(videos)} videos")
+                        st.success(f"Loaded {len(videos)}")
                         st.session_state.playlist_videos = videos
     
-    elif input_method == "Batch URLs":
+    elif input_method == "Batch":
         batch_urls = st.text_area("URLs (one per line)")
         if batch_urls:
             urls = [u.strip() for u in batch_urls.split('\n') if u.strip()]
             videos_to_process = [{"title": f"Video {i+1}", "url": url, "type": "url"} 
                                for i, url in enumerate(urls)]
     
-    if 'playlist_videos' in st.session_state and input_method == "Playlist URL":
+    if 'playlist_videos' in st.session_state and input_method == "Playlist":
         videos_to_process = st.session_state.playlist_videos
     
     if videos_to_process:
-        st.subheader(f"Videos to Process ({len(videos_to_process)})")
+        st.subheader(f"To Process ({len(videos_to_process)})")
         
-        # System prompt
-        default_prompt = """You are an expert at analyzing and structuring YouTube video transcripts..."""
+        default_prompt = """You are an expert at structuring YouTube transcripts.
+
+Structure the transcript:
+1. Create clear sections
+2. Improve readability
+3. Preserve information
+4. Use markdown
+
+Output in English."""
         
-        system_prompt = st.text_area(
-            "System Prompt",
-            value=default_prompt,
-            height=200
-        )
+        system_prompt = st.text_area("System Prompt", value=default_prompt, height=200)
         
         mode_emoji = {"speed": "⚡", "balanced": "⚖️", "quality": "🎯"}
-        if st.button(f"Start Processing {mode_emoji[perf_mode]} {perf_mode.title()}", type="primary"):
+        if st.button(f"Start {mode_emoji[perf_mode]} {perf_mode.title()}", type="primary"):
             process_videos(videos_to_process, language, use_asr, system_prompt, 
                          model, temp, api_keys, browser, perf_mode)
 
 def process_videos(videos, language, use_asr, system_prompt, model, temp, api_keys, browser, perf_mode):
-    """Process videos with optimizations"""
+    """Process videos"""
     username = st.session_state.username
     data_manager = get_data_manager()
     
-    # Initialize providers
     supadata = OptimizedSupadataProvider(api_keys.get('supadata', ''))
     assemblyai = OptimizedAssemblyAIProvider(api_keys.get('assemblyai', ''), browser) if use_asr else None
     deepseek = OptimizedDeepSeekProvider(
@@ -2175,7 +1982,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
     
     for i, video in enumerate(videos):
         st.subheader(f"Processing {i+1}/{len(videos)}")
-        st.write(f"**Title:** {video['title']}")
+        st.write(f"**{video['title']}**")
         
         start_time = time.time()
         
@@ -2193,7 +2000,6 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
         entry_id = history_entry.get('id')
         
         try:
-            # Get transcript
             if video.get("type") == "direct_transcript":
                 transcript = video.get("transcript", "")
             else:
@@ -2201,19 +2007,18 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
                     transcript = orchestrator.get_transcript(video['url'], language, use_asr)
             
             if not transcript:
-                raise Exception("Failed to get transcript")
+                raise Exception("No transcript")
             
             history_entry["transcript_length"] = len(transcript)
             data_manager.update_history_entry(username, entry_id, history_entry)
             
-            # Structure transcript
             with st.spinner("Structuring..."):
                 summary_placeholder = st.empty()
                 
                 def progress_callback(component_type, content):
                     if component_type == "executive_summary":
                         with summary_placeholder.container():
-                            st.subheader("📋 Executive Summary")
+                            st.subheader("📋 Summary")
                             st.markdown(content)
                 
                 result = orchestrator.structure_transcript_with_live_updates(
@@ -2221,7 +2026,7 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
                 )
             
             if not result:
-                raise Exception("Failed to structure transcript")
+                raise Exception("Failed to structure")
             
             processing_time = time.time() - start_time
             history_entry["processing_time"] = f"{processing_time:.1f}s"
@@ -2231,14 +2036,12 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             
             data_manager.update_history_entry(username, entry_id, history_entry)
             
-            st.success("🎉 Processing completed!")
+            st.success("🎉 Done!")
             
-            # Show results
             if result.get('detailed_transcript'):
-                with st.expander("📝 Detailed Transcript", expanded=False):
+                with st.expander("📝 Transcript", expanded=False):
                     st.markdown(result['detailed_transcript'])
             
-            # Downloads
             col1, col2 = st.columns(2)
             with col1:
                 if result.get('executive_summary'):
@@ -2266,28 +2069,28 @@ def process_videos(videos, language, use_asr, system_prompt, model, temp, api_ke
             data_manager.update_history_entry(username, entry_id, history_entry)
 
 def main_app():
-    """Main app interface"""
+    """Main app"""
     st.title("YouTube Transcript Processor")
     
     if 'current_page' not in st.session_state:
         st.session_state.current_page = "main"
     
     with st.sidebar:
-        st.write(f"Welcome, **{st.session_state.username}**!")
+        st.write(f"**{st.session_state.username}**")
         st.divider()
         
         if st.session_state.current_page != "history_detail":
-            page_options = ["🎬 Process Videos", "📚 History", "⚙️ Settings"]
-            current_index = 0
+            pages = ["🎬 Process", "📚 History", "⚙️ Settings"]
+            idx = 0
             
             if st.session_state.current_page == "history":
-                current_index = 1
+                idx = 1
             elif st.session_state.current_page == "settings":
-                current_index = 2
+                idx = 2
             
-            page = st.radio("Navigation", page_options, index=current_index)
+            page = st.radio("Navigation", pages, index=idx)
             
-            if page == "🎬 Process Videos":
+            if page == "🎬 Process":
                 st.session_state.current_page = "main"
             elif page == "📚 History":
                 st.session_state.current_page = "history"
@@ -2301,13 +2104,12 @@ def main_app():
                 del st.session_state[key]
             st.rerun()
     
-    # Show appropriate page
     if st.session_state.current_page == "history_detail":
         entry_id = st.session_state.get('current_entry_id')
         if entry_id:
             show_history_detail_page(entry_id)
-        else
-        st.session_state.current_page = "history"
+        else:
+            st.session_state.current_page = "history"
             st.rerun()
     elif st.session_state.current_page == "history":
         show_history_page()
@@ -2316,21 +2118,19 @@ def main_app():
     else:
         show_main_processing_page()
 
-# ==================== MAIN ENTRY POINT ====================
+# ==================== MAIN ====================
 
 def main():
-    """Main entry point"""
+    """Main entry"""
     st.set_page_config(
-        page_title="YouTube Transcript Processor - Optimized",
+        page_title="YouTube Transcript Processor",
         page_icon="⚡",
         layout="wide"
     )
     
-    # Initialize session state
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     
-    # Show appropriate page
     if not st.session_state.authenticated:
         login_page()
     else:
