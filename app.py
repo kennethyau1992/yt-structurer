@@ -627,6 +627,45 @@ class PerformanceOptimizedChunker:
             split_points.append(match.end())
         
         return sorted(list(set(split_points)))
+    
+    def create_chunk_specific_prompt(self, base_prompt: str, chunk_info: Dict, total_chunks: int, language: str) -> str:
+        """Create a context-aware prompt for a specific chunk"""
+        
+        chunk_id = chunk_info['chunk_id']
+        is_first = chunk_id == 0
+        is_last = chunk_info.get('is_final_chunk', False)
+        
+        # Build context information
+        context_info = f"This is chunk {chunk_id + 1} of {total_chunks} from a longer transcript."
+        
+        if is_first:
+            context_info += " This is the BEGINNING of the transcript."
+        elif is_last:
+            context_info += " This is the FINAL chunk of the transcript."
+        else:
+            context_info += f" This is a MIDDLE section of the transcript."
+        
+        # Language-specific instructions
+        if language == "繁體中文" or language == "中文":
+            chunk_instruction = f"""
+{base_prompt}
+
+**重要提示：**
+{context_info}
+請處理此部分內容，保持與整體文檔的連貫性。
+如果這是中間部分，請確保開頭和結尾能夠與前後內容自然銜接。
+"""
+        else:  # English
+            chunk_instruction = f"""
+{base_prompt}
+
+**IMPORTANT CONTEXT:**
+{context_info}
+Process this section while maintaining coherence with the overall document.
+If this is a middle section, ensure the beginning and end can naturally connect with surrounding content.
+"""
+        
+        return chunk_instruction
 
 class AudioChunker:
     """Handles chunking of long audio files for transcription"""
@@ -766,9 +805,9 @@ class AudioChunker:
                     results.append(result)
                     
                     if result['success']:
-                        st.success(f"Chunk {result['chunk_id'] + 1} completed")
+                        st.success(f"✅ Chunk {result['chunk_id'] + 1} completed")
                     else:
-                        st.error(f"Chunk {result['chunk_id'] + 1} failed")
+                        st.error(f"❌ Chunk {result['chunk_id'] + 1} failed")
                         
                 except Exception as e:
                     st.error(f"Chunk processing error: {e}")
@@ -1395,61 +1434,105 @@ class EnhancedDeepSeekProvider(LLMProvider):
             'performance_mode': self.performance_mode
         }
     
-    # [Rest of the methods remain the same but with updated timeout handling]
-    def _make_api_request(self, text: str, system_prompt: str) -> Optional[str]:
-        """Make API request to DeepSeek with performance-optimized timeouts"""
-        try:
-            endpoint = self.base_url + "/chat/completions"
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            }
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
-                "temperature": self.temperature,
-            }
+    def _make_api_request(self, text: str, system_prompt: str, max_retries: int = 3) -> Optional[str]:
+        """Make API request to DeepSeek with retry logic and performance-optimized timeouts"""
+        
+        for attempt in range(max_retries):
+            try:
+                endpoint = self.base_url + "/chat/completions"
+                headers = {
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                }
+                payload = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": text},
+                    ],
+                    "temperature": self.temperature,
+                }
 
-            # Performance-optimized timeout
-            resp = requests.post(
-                endpoint, 
-                headers=headers, 
-                data=json.dumps(payload), 
-                timeout=self.processing_timeout
-            )
-            
-            if resp.status_code != 200:
-                error_detail = ""
-                try:
-                    error_data = resp.json()
-                    error_detail = error_data.get('error', {}).get('message', resp.text)
-                except:
-                    error_detail = resp.text
+                # Performance-optimized timeout
+                resp = requests.post(
+                    endpoint, 
+                    headers=headers, 
+                    data=json.dumps(payload), 
+                    timeout=self.processing_timeout
+                )
                 
-                raise RuntimeError(f"DeepSeek API error {resp.status_code}: {error_detail}")
-            
-            data = resp.json()
-            
-            if 'choices' not in data or len(data['choices']) == 0:
-                raise RuntimeError("DeepSeek API returned no choices")
-            
-            content = data["choices"][0]["message"]["content"]
-            if not content:
-                raise RuntimeError("DeepSeek API returned empty content")
+                if resp.status_code != 200:
+                    error_detail = ""
+                    try:
+                        error_data = resp.json()
+                        error_detail = error_data.get('error', {}).get('message', resp.text)
+                    except:
+                        error_detail = resp.text
+                    
+                    # Check if we should retry
+                    if resp.status_code in [429, 500, 502, 503, 504]:  # Rate limit or server errors
+                        if attempt < max_retries - 1:
+                            wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                            st.warning(f"⚠️ API error {resp.status_code}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(wait_time)
+                            continue
+                    
+                    raise RuntimeError(f"DeepSeek API error {resp.status_code}: {error_detail}")
                 
-            return content.strip()
-            
-        except requests.exceptions.Timeout:
-            raise RuntimeError(f"DeepSeek API request timed out after {self.processing_timeout} seconds")
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError("Failed to connect to DeepSeek API - check internet connection")
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"DeepSeek API network error: {str(e)}")
-        except Exception as e:
-            raise RuntimeError(f"DeepSeek processing error: {str(e)}")
+                data = resp.json()
+                
+                if 'choices' not in data or len(data['choices']) == 0:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2
+                        st.warning(f"⚠️ Empty response from API, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    raise RuntimeError("DeepSeek API returned no choices")
+                
+                content = data["choices"][0]["message"]["content"]
+                if not content:
+                    if attempt < max_retries - 1:
+                        wait_time = (attempt + 1) * 2
+                        st.warning(f"⚠️ Empty content from API, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    raise RuntimeError("DeepSeek API returned empty content")
+                
+                # Success! Return the content
+                if attempt > 0:
+                    st.success(f"✅ API call succeeded on attempt {attempt + 1}")
+                return content.strip()
+                
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 3  # Longer wait for timeouts
+                    st.warning(f"⏱️ Request timed out after {self.processing_timeout}s, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                raise RuntimeError(f"DeepSeek API request timed out after {self.processing_timeout} seconds (all {max_retries} attempts failed)")
+                
+            except requests.exceptions.ConnectionError:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5  # Even longer wait for connection errors
+                    st.warning(f"🔌 Connection error, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                raise RuntimeError("Failed to connect to DeepSeek API - check internet connection (all retries failed)")
+                
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    st.warning(f"⚠️ Network error: {str(e)}, retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(wait_time)
+                    continue
+                raise RuntimeError(f"DeepSeek API network error: {str(e)} (all {max_retries} retries failed)")
+                
+            except Exception as e:
+                # Don't retry on unexpected errors
+                raise RuntimeError(f"DeepSeek processing error: {str(e)}")
+        
+        # If we get here, all retries failed
+        raise RuntimeError(f"DeepSeek API failed after {max_retries} attempts")
     
     def _process_for_summary(self, transcript: str, summary_prompt: str, language: str) -> Optional[str]:
         """Process transcript to generate executive summary"""
@@ -1527,17 +1610,17 @@ Below are summary chunks from different parts of a video transcript. Your task i
 Create a polished, professional executive summary that flows naturally."""
             
         else:  # Chinese
-            final_summary_prompt = """你是一个专业的多摘要块综合专家。
+            final_summary_prompt = """你是一個專業的多摘要塊綜合專家。
 
-以下是视频转录文本不同部分的摘要块。你的任务是：
+以下是視頻轉錄文本不同部分的摘要塊。你的任務是：
 
-1. 将这些块合并成一个统一的执行摘要
-2. 去除冗余和重叠的点
-3. 逻辑性地组织信息
-4. 保持结构：概述、关键点、重要细节、结论/要点
-5. 保持简洁但全面
+1. 將這些塊合併成一個統一的執行摘要
+2. 去除冗餘和重疊的點
+3. 邏輯性地組織信息
+4. 保持結構：概述、關鍵點、重要細節、結論/要點
+5. 保持簡潔但全面
 
-创建一个精美、专业的执行摘要，自然流畅。"""
+創建一個精美、專業的執行摘要，自然流暢。"""
         
         return self._make_api_request(combined_summaries, final_summary_prompt)
     
@@ -1590,16 +1673,23 @@ Create a polished, professional executive summary that flows naturally."""
                     result = future.result()
                     if result:
                         processed_chunks[chunk_id] = result
-                        st.success(f"Detailed chunk {chunk_id + 1} completed")
+                        st.success(f"✅ Detailed chunk {chunk_id + 1} completed")
+                    else:
+                        st.error(f"❌ Detailed chunk {chunk_id + 1} returned empty result")
                 except Exception as e:
-                    st.error(f"Detailed chunk {chunk_id + 1} failed: {e}")
+                    st.error(f"❌ Detailed chunk {chunk_id + 1} failed: {e}")
         
         # Filter out None values
         valid_chunks = [c for c in processed_chunks if c is not None]
         
         if not valid_chunks:
-            st.error("All detailed chunks failed to process")
+            st.error("❌ All detailed chunks failed to process")
             return None
+        
+        # Show warning if some chunks failed
+        failed_count = len(chunks) - len(valid_chunks)
+        if failed_count > 0:
+            st.warning(f"⚠️ {failed_count} out of {len(chunks)} chunks failed, continuing with {len(valid_chunks)} successful chunks")
         
         # Combine chunks intelligently
         st.info("Combining processed chunks into final detailed transcript...")
@@ -1608,6 +1698,7 @@ Create a polished, professional executive summary that flows naturally."""
     def _process_chunks_sequential(self, chunks: List[Dict], system_prompt: str, language: str) -> Optional[str]:
         """Process chunks sequentially for quality/balanced modes"""
         processed_chunks = []
+        failed_chunks = []
         
         for i, chunk_info in enumerate(chunks):
             st.info(f"Processing detailed chunk {i+1}/{len(chunks)} (~{chunk_info['tokens_estimate']} tokens)")
@@ -1617,15 +1708,29 @@ Create a polished, professional executive summary that flows naturally."""
                 system_prompt, chunk_info, len(chunks), language
             )
             
-            # Process chunk
-            result = self._make_api_request(chunk_info['text'], chunk_prompt)
-            
-            if result:
-                processed_chunks.append(result)
-                st.success(f"Chunk {i+1} processed successfully")
-            else:
-                st.error(f"Chunk {i+1} failed")
-                return None
+            # Process chunk with retry logic
+            try:
+                result = self._make_api_request(chunk_info['text'], chunk_prompt)
+                
+                if result:
+                    processed_chunks.append(result)
+                    st.success(f"✅ Chunk {i+1} processed successfully")
+                else:
+                    st.error(f"❌ Chunk {i+1} returned empty result")
+                    failed_chunks.append(i+1)
+            except Exception as e:
+                st.error(f"❌ Chunk {i+1} failed: {e}")
+                failed_chunks.append(i+1)
+                # Continue with other chunks instead of failing completely
+                continue
+        
+        if not processed_chunks:
+            st.error("❌ All chunks failed to process")
+            return None
+        
+        # Show warning if some chunks failed
+        if failed_chunks:
+            st.warning(f"⚠️ Chunks {failed_chunks} failed, but continuing with {len(processed_chunks)} successful chunks")
         
         # Combine chunks intelligently
         st.info("Combining processed chunks into final detailed transcript...")
@@ -1643,15 +1748,14 @@ Create a polished, professional executive summary that flows naturally."""
             footer = f"\n\n---\n*This document was processed using {self.performance_mode} mode with {len(chunk_results)} chunks for optimal performance.*"
         else:  # Chinese
             separator = "\n\n---\n\n"
-            header = "# 详细结构化转录文稿\n\n"
-            footer = f"\n\n---\n*本文档使用{self.performance_mode}模式处理了{len(chunk_results)}个块以获得最佳性能。*"
+            header = "# 詳細結構化轉錄文稿\n\n"
+            footer = f"\n\n---\n*本文檔使用{self.performance_mode}模式處理了{len(chunk_results)}個塊以獲得最佳性能。*"
         
         # Combine chunks
         combined = header + separator.join(chunk_results) + footer
         
         return combined
     
-    # [Additional helper methods remain the same...]
     def _adapt_system_prompt_to_language(self, system_prompt: str, detected_language: str, is_custom_prompt: bool = False) -> str:
         """Adapt the system prompt to match the detected language - but preserve user customizations"""
         
@@ -1932,7 +2036,7 @@ class EnhancedTranscriptOrchestrator:
             transcript, system_prompt, language, is_custom_prompt, progress_callback
         )
 
-# ==================== STREAMLIT UI UPDATES ====================
+# ==================== STREAMLIT UI ====================
 
 def login_page():
     """Display login page"""
@@ -2029,10 +2133,10 @@ def show_history_detail_page(entry_id: str):
             st.write(f"**Status:** {entry.get('status', 'N/A')}")
             st.write(f"**Processing Time:** {entry.get('processing_time', 'N/A')}")
             
-            # NEW: Show performance mode if available
+            # Show performance mode if available
             if entry.get('performance_mode'):
                 mode_emoji = {"speed": "⚡", "balanced": "⚖️", "quality": "🎯"}
-                emoji = mode_emoji.get(entry['performance_mode'], "")
+                emoji =mode_emoji.get(entry['performance_mode'], "")
                 st.write(f"**Performance Mode:** {emoji} {entry['performance_mode'].title()}")
     
     # Video description
@@ -2339,7 +2443,7 @@ def show_settings_page():
                 help="Default model for processing"
             )
             
-            # NEW: Performance Mode Selection
+            # Performance Mode Selection
             performance_mode = st.selectbox(
                 "Performance Mode",
                 ["speed", "balanced", "quality"],
@@ -2566,27 +2670,27 @@ def show_main_processing_page():
         
         with col1:
             if api_keys.get('supadata'):
-                st.success("Supadata")
+                st.success("Supadata ✅")
             else:
-                st.error("Supadata")
+                st.error("Supadata ❌")
         
         with col2:
             if api_keys.get('assemblyai'):
-                st.success("AssemblyAI")
+                st.success("AssemblyAI ✅")
             else:
-                st.error("AssemblyAI")
+                st.error("AssemblyAI ❌")
         
         with col3:
             if api_keys.get('deepseek'):
-                st.success("DeepSeek")
+                st.success("DeepSeek ✅")
             else:
-                st.error("DeepSeek")
+                st.error("DeepSeek ❌")
         
         with col4:
             if api_keys.get('youtube'):
-                st.success("YouTube Data")
+                st.success("YouTube Data ✅")
             else:
-                st.error("YouTube Data")
+                st.error("YouTube Data ❌")
     
     # Enhanced Settings with Performance Mode
     with st.expander("Processing Settings"):
@@ -2606,7 +2710,7 @@ def show_main_processing_page():
                 help="Use AssemblyAI when official captions are not available"
             )
             
-            # NEW: Performance Mode Selection
+            # Performance Mode Selection
             performance_mode = st.selectbox(
                 "Performance Mode",
                 ["speed", "balanced", "quality"],
@@ -3062,7 +3166,7 @@ def process_videos_with_enhanced_performance(videos, language, use_asr_fallback,
             "executive_summary": None,
             "detailed_transcript": None,
             "error": None,
-            "performance_mode": performance_mode  # NEW: Track performance mode
+            "performance_mode": performance_mode
         }
         
         # Add to history immediately for tracking
